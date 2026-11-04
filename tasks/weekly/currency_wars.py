@@ -617,6 +617,16 @@ class CurrencyWars:
     def start_silver_wolf(self) -> bool:
         """运行独立银狼脚本，不经过普通货币战争的主循环。"""
         log.hr('准备银狼货币战争（测试版）', '0')
+        # 新对局入口会先调用 game.start()；该过程会从磁盘重新载入
+        # 常规货币战争设置。必须在游戏启动完成后再次锁定专用配置，
+        # 否则用户的常规“超频博弈”设置会覆盖银狼脚本的标准博弈。
+        overrides = self.activate_silver_wolf_task_config()
+        log.info(
+            "银狼专用配置已在游戏启动后锁定："
+            f"模式={overrides['currencywars_type']}，"
+            f"难度={overrides['currencywars_rank_difficulty']}，"
+            f"策略={overrides['currencywars_strategy']}"
+        )
         success = self.run_silver_wolf()
         return self.finish_run(success, preserve_active_run=True)
 

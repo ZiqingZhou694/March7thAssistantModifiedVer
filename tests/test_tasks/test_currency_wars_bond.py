@@ -47,6 +47,22 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertEqual(values["currencywars_silver_wolf_completion_goal"], "silver_wolf_3star")
         self.assertEqual(self.module.cfg.currencywars_silver_wolf_completion_goal, "silver_wolf_3star")
 
+    def test_silver_wolf_start_reapplies_config_after_game_start_reload(self):
+        # 模拟 game.start() 从磁盘重新载入了用户常规的超频设置。
+        self.module.cfg.currencywars_type = "overclock"
+        self.module.cfg.currencywars_rank_difficulty = "highest"
+        self.module.cfg.currencywars_strategy = "default"
+        self.war.run_silver_wolf = mock.Mock(return_value=False)
+        self.war.finish_run = mock.Mock(return_value=False)
+
+        self.assertFalse(self.war.start_silver_wolf())
+
+        self.assertEqual(self.module.cfg.currencywars_type, "normal")
+        self.assertEqual(self.module.cfg.currencywars_rank_difficulty, "amethyst1")
+        self.assertEqual(self.module.cfg.currencywars_strategy, "bond")
+        self.war.run_silver_wolf.assert_called_once_with()
+        self.war.finish_run.assert_called_once_with(False, preserve_active_run=True)
+
     def test_gm_console_is_checked_before_main_preparation_screen(self):
         source = Path(self.module.__file__).read_text(encoding="utf-8")
         loop_source = source[source.index("    def loop(self)"):source.index("    def check_resume_exit_confirmation")]
