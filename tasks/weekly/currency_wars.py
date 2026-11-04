@@ -426,38 +426,64 @@ class CurrencyWars:
     def sync_silver_wolf_copies_from_board(self) -> int:
         """用场上/场下实际星级校准当前费用银狼份数，补上补给获得但未计数的狼。"""
         visible_copies = 0
+        visible_three_star = False
         for char in self.forward_characters + self.backward_characters + self.prepare_characters:
             if self._normalize_tracked_character_name(char.name) != "银狼LV.999":
                 continue
             if int(char.money) != self.silver_wolf_cost:
                 continue
             visible_copies += 3 ** (max(1, int(char.level)) - 1)
+            visible_three_star = visible_three_star or int(char.level) >= 3
         if visible_copies > self.silver_wolf_copies[self.silver_wolf_cost]:
             self.silver_wolf_copies[self.silver_wolf_cost] = visible_copies
             log.info(f"按队伍实际星级校准银狼进度：{self.silver_wolf_cost}费共{visible_copies}份")
-        if self.silver_wolf_cost == 5 and visible_copies >= 9:
+        # 中途接管恢复完成状态时必须实际看到三星卡，不能只凭累计份数推断。
+        if self.silver_wolf_cost == 5 and visible_three_star:
             self.silver_wolf_three_star = True
             log.info("从角色详情顶部三星徽标确认：已获得三星5费银狼LV.999")
         return visible_copies
 
     @staticmethod
     def classify_character_star_badge(image) -> Optional[int]:
-        """按详情面板顶部金色星徽像素量识别1/2/3星。"""
+        """按详情面板顶部独立星形峰的数量识别1/2/3星。
+
+        不能直接用金色像素总量：详情框金边、发光动画和截图缩放会让同一颗星
+        的金色面积大幅波动。星徽在水平方向上的亮色峰数量则稳定对应星级。
+        """
         try:
             normalized = image.resize((70, 30)).convert("RGB")
-            gold_pixels = sum(
-                1 for red, green, blue in normalized.getdata()
-                if red > 140 and green > 70
+            pixels = list(normalized.get_flattened_data())
+            gold_mask = [
+                red > 140 and green > 70
                 and red > blue * 1.2 and green > blue * 1.05
-            )
+                for red, green, blue in pixels
+            ]
         except Exception:
             return None
-        if gold_pixels >= 500:
-            return 3
-        if gold_pixels >= 300:
-            return 2
-        if gold_pixels >= 100:
-            return 1
+
+        column_strength = [
+            sum(gold_mask[row * 70 + column] for row in range(30))
+            for column in range(70)
+        ]
+        strongest_column = max(column_strength, default=0)
+        if strongest_column < 8:
+            return None
+
+        # 实机一星峰高约19、三星各峰约20；取峰值的60%可排除横向金边，
+        # 同时保留因缩放和动画稍暗的星形。连续亮列组成一颗星。
+        peak_threshold = max(8, int(strongest_column * 0.6))
+        peak_runs = []
+        run_start = None
+        for column, strength in enumerate(column_strength + [0]):
+            if strength >= peak_threshold and run_start is None:
+                run_start = column
+            elif strength < peak_threshold and run_start is not None:
+                if column - run_start >= 2:
+                    peak_runs.append((run_start, column - 1))
+                run_start = None
+
+        if 1 <= len(peak_runs) <= 3:
+            return len(peak_runs)
         return None
 
     def detect_character_star_level(self) -> Optional[int]:

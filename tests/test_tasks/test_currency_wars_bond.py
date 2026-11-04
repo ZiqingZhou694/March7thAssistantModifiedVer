@@ -423,12 +423,25 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertEqual(self.war.silver_wolf_cost, 5)
         self.assertEqual(self.war.silver_wolf_copies[5], 3)
 
+    @staticmethod
+    def make_star_badge(star_count):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (70, 30), (20, 20, 20))
+        draw = ImageDraw.Draw(image)
+        centers = {1: (35,), 2: (27, 43), 3: (19, 35, 51)}[star_count]
+        for center in centers:
+            draw.rectangle((center - 3, 7, center + 3, 23), fill=(255, 190, 80))
+        return image
+
+    def test_star_badge_counts_independent_horizontal_peaks(self):
+        for expected in (1, 2, 3):
+            with self.subTest(expected=expected):
+                image = self.make_star_badge(expected)
+                self.assertEqual(self.war.classify_character_star_badge(image), expected)
+
     def test_three_star_badge_restores_completed_five_cost_wolf(self):
-        image = mock.Mock()
-        normalized = image.resize.return_value.convert.return_value
-        normalized.getdata.return_value = (
-            [(255, 190, 80)] * 500 + [(20, 20, 20)] * 1600
-        )
+        image = self.make_star_badge(3)
         self.assertEqual(self.war.classify_character_star_badge(image), 3)
         self.war.silver_wolf_cost = 5
         self.war.forward_characters = [
@@ -436,6 +449,18 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         ]
         self.assertEqual(self.war.sync_silver_wolf_copies_from_board(), 9)
         self.assertTrue(self.war.silver_wolf_three_star)
+
+    def test_copy_total_without_visible_three_star_does_not_complete(self):
+        self.war.silver_wolf_cost = 5
+        self.war.forward_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5),
+        ]
+        self.war.prepare_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5),
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5),
+        ]
+        self.assertEqual(self.war.sync_silver_wolf_copies_from_board(), 9)
+        self.assertFalse(self.war.silver_wolf_three_star)
 
     def test_only_one_healer_and_primary_healers_win(self):
         characters = self.chars("加拉赫", "灵砂", "藿藿", "风堇")
