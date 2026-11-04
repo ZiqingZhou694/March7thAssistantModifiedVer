@@ -19,6 +19,24 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertIn("员工投影仪只能给3费银狼使用", rules)
         self.assertIn("完美投影仪只能给5费银狼使用", rules)
         self.assertIn("银狼升到4费后，不再购买任何非银狼角色", rules)
+        self.assertIn("普通角色“银狼”必须明确排除", rules)
+
+    def test_only_lv999_is_the_silver_wolf_target(self):
+        self.module.cfg.currencywars_strategy = "bond"
+        self.assertEqual(self.war._normalize_tracked_character_name("银狼LV999"), "银狼LV.999")
+        self.assertEqual(self.war._normalize_tracked_character_name("银狼"), "银狼")
+        self.assertEqual(self.war.SILVER_WOLF_LV999_NAMES, ("银狼LV.999", "银狼LV999"))
+        self.assertNotIn("银狼", self.war.SILVER_WOLF_LV999_NAMES)
+        self.assertNotIn("银狼", self.war.SILVER_WOLF_LV999_SUPPLY_MARKERS)
+        self.assertEqual(self.war.get_character_purchase_cost("银狼LV.999"), 3)
+        self.assertEqual(self.war.get_character_purchase_cost("银狼"), 4)
+
+    def test_lv999_shop_aliases_never_fall_back_to_plain_silver_wolf(self):
+        self.module.auto.click_element = mock.Mock(return_value=False)
+        self.assertFalse(self.war.try_buy_character("银狼LV.999", wait_time=0))
+        candidates = self.module.auto.click_element.call_args.args[0]
+        self.assertEqual(candidates, ("银狼LV.999", "银狼LV999"))
+        self.assertNotIn("银狼", candidates)
 
     def test_silver_wolf_settings_are_isolated_from_regular_currency_wars(self):
         source_root = Path(self.module.__file__).resolve().parents[2]
@@ -649,12 +667,13 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.module.auto.find_element = mock.Mock(return_value=True)
 
         def click(target, *args, **kwargs):
-            return isinstance(target, tuple) and "银狼" in target
+            return isinstance(target, tuple) and "银狼LV.999" in target
 
         self.module.auto.click_element = mock.Mock(side_effect=click)
         self.assertTrue(self.war._check_expert_invitation())
         attempted = [call.args[0] for call in self.module.auto.click_element.call_args_list]
-        self.assertIn(("银狼LV.999", "银狼"), attempted)
+        self.assertIn(("银狼LV.999", "银狼LV999"), attempted)
+        self.assertNotIn(("银狼LV.999", "银狼"), attempted)
 
     def test_bond_emblem_never_uses_character_recommendation(self):
         self.module.auto.click_element = mock.Mock(return_value=True)

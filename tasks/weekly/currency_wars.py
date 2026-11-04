@@ -29,6 +29,8 @@ class CurrencyWars:
     BOND_TRANSITION_HEALERS = ("藿藿", "风堇", "灵砂", "罗刹", "白露", "娜塔莎", "加拉赫")
     BOND_PRIMARY_HEALERS = ("藿藿", "风堇")
     BOND_ECONOMY_CORE = ("银狼LV.999",)
+    SILVER_WOLF_LV999_NAMES = ("银狼LV.999", "银狼LV999")
+    SILVER_WOLF_LV999_SUPPLY_MARKERS = (*SILVER_WOLF_LV999_NAMES, "头号玩家")
     BOND_OPENING_ENVIRONMENTS = (
         "长线利好", "经济严重过热", "经济过热", "银金彩",
         "彩虹时代", "战争边疆", "策略大师",
@@ -506,7 +508,11 @@ class CurrencyWars:
         if not isinstance(name, str):
             return None
         name = name.strip()
-        name = {"阮梅": "阮•梅", "阮·梅": "阮•梅"}.get(name, name)
+        name = {
+            "阮梅": "阮•梅",
+            "阮·梅": "阮•梅",
+            "银狼LV999": "银狼LV.999",
+        }.get(name, name)
         return name or None
 
     def mark_tracked_character(self, name: Optional[str], zone_name: Optional[str] = None) -> bool:
@@ -535,7 +541,7 @@ class CurrencyWars:
         normalized_name = self._normalize_tracked_character_name(name)
         if not normalized_name:
             return None
-        if normalized_name in ("银狼", "银狼LV.999") and cfg.currencywars_strategy == "bond":
+        if normalized_name == "银狼LV.999" and cfg.currencywars_strategy == "bond":
             return self.silver_wolf_cost
         remembrance_trailblazer_name = self.get_remembrance_trailblazer_name()
         if remembrance_trailblazer_name and normalized_name == remembrance_trailblazer_name:
@@ -559,7 +565,7 @@ class CurrencyWars:
         shop_ocr_aliases = {
             "艾丝妲": ("艾丝妲", "艾丝姐", "艾丝坦", "艾丝妨", "艾丝达"),
             "阮•梅": ("阮•梅", "阮·梅", "阮梅"),
-            "银狼LV.999": ("银狼LV.999", "银狼LV999", "银狼"),
+            "银狼LV.999": self.SILVER_WOLF_LV999_NAMES,
         }
         candidates = shop_ocr_aliases.get(normalized_name, (normalized_name,))
         if auto.click_element(
@@ -1691,7 +1697,7 @@ class CurrencyWars:
                 # 已在场下合成二星时，下一只同费用银狼必须留在商店：先让
                 # 二星狼上场升费，再回来购买同步升费后的商店狼。
                 silver_wolf_in_shop = bool(self._find_text_in_texts(
-                    shop_texts, ("银狼LV.999", "银狼LV999", "银狼"), include=True
+                    shop_texts, self.SILVER_WOLF_LV999_NAMES, include=True
                 ))
                 if (self.silver_wolf_cost in (3, 4)
                         and self.silver_wolf_copies[self.silver_wolf_cost] >= 3
@@ -1709,7 +1715,7 @@ class CurrencyWars:
                         continue
                     if not self.can_afford_character(current_money, name):
                         continue
-                    buy_names = ("银狼LV.999", "银狼") if name == "银狼LV.999" else (name,)
+                    buy_names = self.SILVER_WOLF_LV999_NAMES if name == "银狼LV.999" else (name,)
                     if any(self.try_buy_character(buy_name) for buy_name in buy_names):
                         self.bond_core_purchase_counts[name] += 1
                         if name == "银狼LV.999":
@@ -1887,10 +1893,10 @@ class CurrencyWars:
         shop_crop = (344 / 1920, 19 / 1080, 1370 / 1920, 526 / 1080)
         shop_texts = self._get_ocr_texts_in_crop(shop_crop)
         silver_wolf_in_shop = bool(self._find_text_in_texts(
-            shop_texts, ("银狼LV.999", "银狼LV999", "银狼"), include=True
+            shop_texts, self.SILVER_WOLF_LV999_NAMES, include=True
         ))
         bought = silver_wolf_in_shop and any(
-            self.try_buy_character(name) for name in ("银狼LV.999", "银狼")
+            self.try_buy_character(name) for name in self.SILVER_WOLF_LV999_NAMES
         )
         if bought:
             self.record_silver_wolf_copy()
@@ -1928,7 +1934,7 @@ class CurrencyWars:
                 (344 / 1920, 19 / 1080, 1370 / 1920, 526 / 1080)
             )
             silver_wolf_in_shop = bool(self._find_text_in_texts(
-                shop_texts, ("银狼LV.999", "银狼LV999", "银狼"), include=True
+                shop_texts, self.SILVER_WOLF_LV999_NAMES, include=True
             ))
             if money >= 5:
                 if self.has_silver_wolf_manual_checkpoint() and silver_wolf_in_shop:
@@ -1936,7 +1942,7 @@ class CurrencyWars:
                     log.info("检测到1个二星5费银狼、2个一星5费银狼且商店有狼；停止购买并暂时离开")
                     break
                 if silver_wolf_in_shop:
-                    for name in ("银狼LV.999", "银狼"):
+                    for name in self.SILVER_WOLF_LV999_NAMES:
                         if self.try_buy_character(name):
                             self.record_silver_wolf_copy()
                             if not self.handle_silver_wolf_planner_if_visible():
@@ -1988,7 +1994,7 @@ class CurrencyWars:
 
     def is_silver_wolf_visible_in_shop(self) -> bool:
         return bool(auto.find_element(
-            ("银狼LV.999", "银狼LV999", "银狼"),
+            self.SILVER_WOLF_LV999_NAMES,
             "text", take_screenshot=False, need_ocr=False, include=True,
         ))
 
@@ -2032,7 +2038,7 @@ class CurrencyWars:
             for name in self.BOND_ECONOMY_CORE:
                 if self.bond_core_purchase_counts[name] >= 9 or not self.can_afford_character(money, name):
                     continue
-                buy_names = ("银狼LV.999", "银狼") if name == "银狼LV.999" else (name,)
+                buy_names = self.SILVER_WOLF_LV999_NAMES if name == "银狼LV.999" else (name,)
                 for buy_name in buy_names:
                     if self.try_buy_character(buy_name):
                         money = self.spend_character_purchase_cost(money, name)
@@ -4089,7 +4095,7 @@ class CurrencyWars:
         elif cfg.currencywars_strategy == "bond":
             # 本路线不选昔涟：银狼优先，其次姬子·启行/千冶·刃与其生存体系。
             priority_groups = [
-                ("银狼LV.999", "银狼"),
+                self.SILVER_WOLF_LV999_NAMES,
                 self.SURVIVAL_CARRIES,
                 self.ELATION_MEMBERS,
                 self.HIMEKO_SUPPORT_MEMBERS,
@@ -4885,7 +4891,7 @@ class CurrencyWars:
                     for index in active_indices:
                         silver_wolf_match = self._find_text_in_texts(
                             option_texts[index],
-                            ("银狼LV.999", "银狼", "头号玩家"),
+                            self.SILVER_WOLF_LV999_SUPPLY_MARKERS,
                             include=True,
                         )
                         if silver_wolf_match:
