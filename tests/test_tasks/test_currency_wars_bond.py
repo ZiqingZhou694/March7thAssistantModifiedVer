@@ -259,10 +259,23 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.module.auto.press_key = mock.Mock()
         self.module.auto.click_element = mock.Mock(return_value=True)
         self.assertTrue(self.war.leave_currency_wars_temporarily())
+        self.assertTrue(self.war.silver_wolf_temporarily_left)
         self.module.auto.press_key.assert_called_once_with('esc')
         self.module.auto.click_element.assert_called_once_with(
             '暂时离开', 'text', include=True
         )
+
+    def test_failed_temporary_leave_never_marks_successful_exit(self):
+        self.module.auto.press_key = mock.Mock()
+        self.module.auto.click_element = mock.Mock(return_value=False)
+        self.assertFalse(self.war.leave_currency_wars_temporarily())
+        self.assertFalse(self.war.silver_wolf_temporarily_left)
+
+    def test_success_notification_requires_temporary_leave(self):
+        self.war.silver_wolf_target_completed = True
+        self.assertFalse(self.war.finish_run(True, preserve_active_run=True))
+        message = self.module.Base.send_notification_with_screenshot.call_args.args[0]
+        self.assertEqual(message, "货币战争未完成")
 
     def test_mid_run_exit_confirmation_is_closed_with_escape_only(self):
         self.module.auto.find_element = mock.Mock(side_effect=[True, True])
@@ -336,6 +349,7 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.war.silver_wolf_cost = 5
         self.war.silver_wolf_copies[5] = 8
         self.war.check_money = mock.Mock(return_value=20)
+        self.war.check_shop_refresh_cost = mock.Mock(return_value=2)
         self.war._get_ocr_texts_in_crop = mock.Mock(
             side_effect=[["黑塔"], ["银狼LV.999"]]
         )
@@ -365,9 +379,36 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.module.auto.press_key.assert_called_once_with("d")
         self.assertTrue(self.war.silver_wolf_three_star)
 
+    def test_final_all_in_handles_planner_popup_before_declaring_completion(self):
+        self.war.silver_wolf_cost = 5
+        self.war.silver_wolf_copies[5] = 7
+        self.war.check_money = mock.Mock(return_value=20)
+        self.war._get_ocr_texts_in_crop = mock.Mock(return_value=["银狼LV.999"])
+        self.war.has_silver_wolf_manual_checkpoint = mock.Mock(return_value=False)
+        self.war.try_buy_character = mock.Mock(return_value=True)
+        self.module.auto.get_single_line_text = mock.Mock(
+            side_effect=["", "我来当策划"]
+        )
+
+        def choose_data_copier():
+            self.war.record_silver_wolf_copy()
+            return True
+
+        self.war.choose_silver_wolf_planner_option = mock.Mock(
+            side_effect=choose_data_copier
+        )
+        self.module.auto.click_element = mock.Mock(return_value=True)
+        self.assertTrue(self.war.buy_silver_wolf_all_in())
+        self.war.choose_silver_wolf_planner_option.assert_called_once()
+        self.assertTrue(self.war.silver_wolf_three_star)
+
     def test_shop_refresh_cost_is_read_directly_from_button(self):
         self.module.auto.get_single_line_text = mock.Mock(return_value="1")
         self.assertEqual(self.war.check_shop_refresh_cost(), 1)
+
+    def test_unknown_shop_refresh_cost_is_not_assumed_to_be_one(self):
+        self.module.auto.get_single_line_text = mock.Mock(return_value="?")
+        self.assertIsNone(self.war.check_shop_refresh_cost())
 
     def test_mid_run_scan_restores_five_cost_wolf_and_visible_copies(self):
         self.module.cfg.currencywars_strategy = "bond"
@@ -746,6 +787,16 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertTrue(self.war.choose_silver_wolf_planner_option())
         self.assertTrue(self.war.silver_wolf_data_copier)
         self.assertEqual(self.war.silver_wolf_copies[5], 1)
+
+    def test_five_cost_planner_fallback_does_not_invent_a_wolf_copy(self):
+        self.war.silver_wolf_cost = 5
+        self.war._get_ocr_texts_in_crop = mock.Mock(
+            side_effect=[["随机骇客改件"], ["分身墨镜Max"]]
+        )
+        self.module.auto.click_element = mock.Mock(return_value=True)
+        self.assertTrue(self.war.choose_silver_wolf_planner_option())
+        self.assertFalse(self.war.silver_wolf_data_copier)
+        self.assertEqual(self.war.silver_wolf_copies[5], 0)
 
     def test_supply_scans_five_cards_and_selects_fifth_silver_wolf(self):
         self.module.cfg.currencywars_strategy = "bond"

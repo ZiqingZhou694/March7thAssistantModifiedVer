@@ -147,6 +147,7 @@ class CurrencyWars:
         self.silver_wolf_data_copier: bool = False
         self.silver_wolf_target_completed: bool = False
         self.silver_wolf_manual_checkpoint_reached: bool = False
+        self.silver_wolf_temporarily_left: bool = False
         self.investment_strategy_count: int = 0
         self.seele_missing_basic_equips: set = set()  # 希儿策略：合成时发现缺失的初级装备
         self.zone_name_localization = {
@@ -659,11 +660,16 @@ class CurrencyWars:
 
     def finish_run(self, success: bool, preserve_active_run: bool = False) -> bool:
         """处理两种货币战争入口共用的通知与收尾。"""
+        if success and (self.silver_wolf_target_completed or self.silver_wolf_manual_checkpoint_reached):
+            if not self.silver_wolf_temporarily_left:
+                log.error("银狼目标已满足但尚未成功暂时离开；禁止发送成功通知")
+                success = False
         if success:
             if self.silver_wolf_manual_checkpoint_reached:
-                title = "银狼合成材料已齐，请手动合成三星五费"
+                title = "银狼合成材料已齐，已暂时离开对局"
             else:
-                title = "已刷出三星五费银狼LV.999" if self.silver_wolf_target_completed else "货币战争已完成"
+                title = ("已刷出三星五费银狼LV.999并暂时离开对局"
+                         if self.silver_wolf_target_completed else "货币战争已完成")
             Base.send_notification_with_screenshot(title, NotificationLevel.ALL, self.screenshot)
             self.screenshot = None
         else:
@@ -988,6 +994,7 @@ class CurrencyWars:
         self.silver_wolf_data_copier = False
         self.silver_wolf_target_completed = False
         self.silver_wolf_manual_checkpoint_reached = False
+        self.silver_wolf_temporarily_left = False
         self.investment_strategy_count = 0
         self.seele_missing_basic_equips = set()  # 重置缺失初级装备
         self.update_backward()
@@ -1411,13 +1418,21 @@ class CurrencyWars:
                             self.need_restart = True
                             return True
                         self.sell_all_non_silver_wolf()
-                        self.buy_silver_wolf_all_in()
+                        if not self.buy_silver_wolf_all_in():
+                            self.safe_stop_requested = True
+                            return True
                         if self.silver_wolf_manual_checkpoint_reached:
-                            self.leave_currency_wars_temporarily()
+                            if not self.leave_currency_wars_temporarily():
+                                log.error("银狼人工停止点已达到，但未能暂时离开；安全停止并保留对局")
+                                self.safe_stop_requested = True
+                                return True
                             self.result = True
                             return True
                         if self.silver_wolf_three_star:
-                            self.leave_currency_wars_temporarily()
+                            if not self.leave_currency_wars_temporarily():
+                                log.error("三星五费银狼已完成，但未能暂时离开；安全停止并保留对局")
+                                self.safe_stop_requested = True
+                                return True
                             self.silver_wolf_target_completed = True
                             self.result = True
                             return True
@@ -1834,7 +1849,7 @@ class CurrencyWars:
             if char.name and self._normalize_tracked_character_name(char.name) != "银狼LV.999":
                 self._sell_single_character(index)
 
-    def buy_silver_wolf_all_in(self) -> None:
+    def buy_silver_wolf_all_in(self) -> bool:
         # 人工保险停止点：已有1个2星5费狼和2个1星5费狼，商店再出现狼时，
         # 不购买最后一只，直接暂时离开并通知，避免自动合成后卡在GM操作台。
         shop_button_crop = (1591 / 1920, 958 / 1080, 66 / 1920, 46 / 1080)
@@ -1844,6 +1859,9 @@ class CurrencyWars:
         refreshes = 0
         while not self.silver_wolf_three_star:
             bought = False
+            if not self.handle_silver_wolf_planner_if_visible():
+                log.error("3-7刷狼时策划弹窗未能确认；停止操作并保留当前画面")
+                return False
             shop_texts = self._get_ocr_texts_in_crop(
                 (344 / 1920, 19 / 1080, 1370 / 1920, 526 / 1080)
             )
@@ -1859,6 +1877,9 @@ class CurrencyWars:
                     for name in ("银狼LV.999", "银狼"):
                         if self.try_buy_character(name):
                             self.record_silver_wolf_copy()
+                            if not self.handle_silver_wolf_planner_if_visible():
+                                log.error("购买银狼后策划弹窗未能确认；停止操作并保留当前画面")
+                                return False
                             # 最终阶段不能再靠固定成本推算余额；环境和策略可能返利，
                             # 每次购买后都重新读取画面真实金币。
                             money = self.check_money()
@@ -1869,18 +1890,28 @@ class CurrencyWars:
             # 放弃前必须读取画面真实余额与刷新按钮实际费用，不能固定按2金推算。
             money = self.check_money()
             refresh_cost = self.check_shop_refresh_cost()
-            if money < refresh_cost or refreshes >= 500:
+            if (refresh_cost is not None and money < refresh_cost) or money <= 0 or refreshes >= 500:
                 log.info(
                     f"3-7最终刷狼停止刷新：真实金币{money}，"
-                    f"画面刷新成本{refresh_cost}，已刷新{refreshes}次"
+                    f"画面刷新成本{refresh_cost if refresh_cost is not None else '未识别'}，"
+                    f"已刷新{refreshes}次"
                 )
                 break
+            money_before_refresh = money
             auto.press_key('d')
             refreshes += 1
             time.sleep(0.7)
             money = self.check_money()
+            if refresh_cost is None:
+                inferred_cost = money_before_refresh - money
+                if inferred_cost > 0:
+                    log.info(f"按刷新前后真实金币差额确认商店刷新消耗:{inferred_cost}")
+                else:
+                    log.warning("刷新费用未识别且真实金币未减少；停止继续刷新，避免空转或误操作")
+                    break
         auto.click_element(shop_button_crop, "crop")
         time.sleep(1)
+        return True
 
     def has_silver_wolf_manual_checkpoint(self) -> bool:
         wolves = [
@@ -1899,10 +1930,26 @@ class CurrencyWars:
             "text", take_screenshot=False, need_ocr=False, include=True,
         ))
 
+    def handle_silver_wolf_planner_if_visible(self) -> bool:
+        """处理当前可见的银狼策划弹窗；没有弹窗也视为正常。"""
+        title = auto.get_single_line_text(
+            crop=(900 / 1920, 45 / 1080, 260 / 1920, 115 / 1080)
+        )
+        if not isinstance(title, str) or not any(
+            marker in title for marker in ("我来当策划", "请选择一个骇入效果", "请选择一个孩入效果")
+        ):
+            return True
+        log.info(f"3-7刷狼检测到策划弹窗：{title}")
+        return self.choose_silver_wolf_planner_option()
+
     def leave_currency_wars_temporarily(self) -> bool:
         auto.press_key('esc')
         time.sleep(1)
-        return bool(auto.click_element('暂时离开', 'text', include=True))
+        left = bool(auto.click_element('暂时离开', 'text', include=True))
+        self.silver_wolf_temporarily_left = left
+        if left:
+            log.info("已按ESC并点击右侧“暂时离开”")
+        return left
 
     def buy_bond_target(self):
         """200金仅作启动门槛；解锁后先追银狼LV.999/昔涟，再补银河学者。"""
@@ -3505,11 +3552,16 @@ class CurrencyWars:
         upgrade_keywords = (("升至4费", "升至5费", "提升费用", "提高费用", "修改费用", "4费", "5费")
                             if upgrading else ("数据拷贝仪", "数据拷贝", "拷贝仪"))
         chosen = False
+        chosen_data_copier = False
         for crop in option_crops:
             texts = self._get_ocr_texts_in_crop(crop)
             if self._find_text_in_texts(texts, upgrade_keywords, include=True):
                 auto.click_element(crop, "crop")
-                log.info(f"银狼专属选项选择升费：{' / '.join(texts)}")
+                if upgrading:
+                    log.info(f"银狼专属选项选择升费：{' / '.join(texts)}")
+                else:
+                    chosen_data_copier = True
+                    log.info(f"银狼5费专属选项选择数据拷贝仪：{' / '.join(texts)}")
                 chosen = True
                 break
         if not chosen:
@@ -3529,9 +3581,11 @@ class CurrencyWars:
                 self.silver_wolf_copies[old_cost] = 0
                 self.silver_wolf_copies[self.silver_wolf_cost] = max(1, self.silver_wolf_copies[self.silver_wolf_cost])
                 log.info(f"银狼已从{old_cost}费升级为{self.silver_wolf_cost}费")
-            else:
+            elif chosen_data_copier:
                 self.silver_wolf_data_copier = True
                 self.record_silver_wolf_copy()
+            else:
+                log.info("5费策划弹窗未出现数据拷贝仪，已选择其他骇客改件；不增加银狼份数")
         return bool(confirmed)
 
     def identify_current_stage(self):
@@ -3800,7 +3854,7 @@ class CurrencyWars:
         log.warning("未能识别到货币数量")
         return 0
 
-    def check_shop_refresh_cost(self) -> int:
+    def check_shop_refresh_cost(self) -> Optional[int]:
         """直接读取已展开商店刷新按钮上的实际金币费用，不推算策略效果。"""
         refresh_cost_crop = (1570 / 1920, 500 / 1080, 92 / 1920, 62 / 1080)
         text = auto.get_single_line_text(crop=refresh_cost_crop, blacklist=['D', '刷新'])
@@ -3811,8 +3865,8 @@ class CurrencyWars:
                 if 0 < cost <= 9:
                     log.info(f"当前商店刷新金币消耗:{cost}")
                     return cost
-        log.warning(f"商店刷新金币消耗识别失败:{text!r}，暂按1金继续尝试")
-        return 1
+        log.warning(f"商店刷新金币消耗识别失败:{text!r}，将用刷新前后真实金币差额校验")
+        return None
 
     def check_character_limit(self):
         '''

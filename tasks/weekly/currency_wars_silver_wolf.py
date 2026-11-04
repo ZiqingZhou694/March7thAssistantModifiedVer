@@ -166,6 +166,7 @@ class SilverWolfCurrencyWars(CurrencyWars):
         self.silver_wolf_data_copier = False
         self.silver_wolf_target_completed = False
         self.silver_wolf_manual_checkpoint_reached = False
+        self.silver_wolf_temporarily_left = False
         self.investment_strategy_count = 0
         self.seele_missing_basic_equips = set()
         self.update_backward()
