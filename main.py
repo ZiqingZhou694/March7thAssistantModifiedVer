@@ -292,6 +292,7 @@ from tasks.power.power import Power
 from tasks.weekly.universe import Universe
 from tasks.daily.redemption import Redemption
 from tasks.weekly.currency_wars import CurrencyWars
+from tasks.weekly.currency_wars_silver_wolf import SilverWolfCurrencyWars
 from tasks.weekly.divergent_universe import DivergentUniverse
 from tasks.base.genshin_starRail_fps_unlocker import Genshin_StarRail_fps_unlocker
 from tasks.base import screen_test
@@ -403,15 +404,14 @@ def run_sub_task(action):
                 raise
 
     def currencywars(mode=None):
+        war = SilverWolfCurrencyWars() if mode == "smart" else CurrencyWars()
         if mode == "smart":
-            overrides = CurrencyWars.activate_silver_wolf_task_config()
             log.info(
-                "银狼货币战争使用独立配置："
-                f"模式={overrides['currencywars_type']}，"
-                f"难度={overrides['currencywars_rank_difficulty']}，"
-                f"策略={overrides['currencywars_strategy']}"
+                "银狼货币战争使用隔离任务类："
+                f"模式={war.task_config.currencywars_type}，"
+                f"难度={war.task_config.currencywars_rank_difficulty}，"
+                f"策略={war.task_config.currencywars_strategy}"
             )
-        war = CurrencyWars()
         if mode == "loop":
             _run_loop_task_with_telemetry("currencywarsloop", war.start)
         elif mode == "temp":
@@ -420,7 +420,7 @@ def run_sub_task(action):
             if war.is_currency_wars_active_screen():
                 log.info("检测到当前处于货币战争对局，启用中途托管")
                 war.mid_run_attach = True
-                success = war.silver_wolf_loop()
+                success = war.loop()
                 if success and war.silver_wolf_target_completed:
                     from tasks.base.base import Base
                     Base.send_notification_with_screenshot(
@@ -432,7 +432,7 @@ def run_sub_task(action):
             else:
                 log.info("当前不是货币战争对局画面，按正常流程进入并开始新对局")
                 game.start()
-                war.start_silver_wolf()
+                war.start()
         else:
             war.start()
 

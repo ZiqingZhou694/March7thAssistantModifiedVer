@@ -82,48 +82,6 @@ class CurrencyWars:
             "emblem": "银河学者星徽",
         },
     }
-    SILVER_WOLF_TASK_CONFIG = {
-        "currencywars_type": "normal",
-        "currencywars_strategy": "bond",
-        "currencywars_bond_target": "galaxy_scholar",
-        "currencywars_strategy_restart_on_special_tags": True,
-    }
-    SILVER_WOLF_RANK_CONFIG_KEY = "currencywars_silver_wolf_rank_difficulty"
-    SILVER_WOLF_RANK_OPTIONS = ("amethyst1", "current")
-    SILVER_WOLF_COMPLETION_CONFIG_KEY = "currencywars_silver_wolf_completion_goal"
-    SILVER_WOLF_COMPLETION_OPTIONS = ("silver_wolf_3star",)
-
-    @classmethod
-    def activate_silver_wolf_task_config(cls):
-        """Apply process-local settings for the dedicated Silver Wolf task.
-
-        The regular Currency Wars task continues to use config.yaml.  The
-        dedicated task must not be silently changed into the default strategy
-        by settings selected for that regular task.
-        """
-        values = dict(cls.SILVER_WOLF_TASK_CONFIG)
-        config = getattr(cfg, "config", None)
-        if isinstance(config, dict):
-            rank_difficulty = config.get(cls.SILVER_WOLF_RANK_CONFIG_KEY, "amethyst1")
-        else:
-            rank_difficulty = getattr(cfg, cls.SILVER_WOLF_RANK_CONFIG_KEY, "amethyst1")
-        if rank_difficulty not in cls.SILVER_WOLF_RANK_OPTIONS:
-            rank_difficulty = "amethyst1"
-        values["currencywars_rank_difficulty"] = rank_difficulty
-        if isinstance(config, dict):
-            completion_goal = config.get(cls.SILVER_WOLF_COMPLETION_CONFIG_KEY, "silver_wolf_3star")
-        else:
-            completion_goal = getattr(cfg, cls.SILVER_WOLF_COMPLETION_CONFIG_KEY, "silver_wolf_3star")
-        if completion_goal not in cls.SILVER_WOLF_COMPLETION_OPTIONS:
-            completion_goal = "silver_wolf_3star"
-        values[cls.SILVER_WOLF_COMPLETION_CONFIG_KEY] = completion_goal
-        if isinstance(config, dict):
-            config.update(values)
-        else:
-            for key, value in values.items():
-                setattr(cfg, key, value)
-        return values
-
     def __init__(self):
         self._last_battle_keepalive: Optional[float] = None
         self.screenshot = None  # 任务截图
@@ -614,22 +572,6 @@ class CurrencyWars:
         success = self.run()
         return self.finish_run(success)
 
-    def start_silver_wolf(self) -> bool:
-        """运行独立银狼脚本，不经过普通货币战争的主循环。"""
-        log.hr('准备银狼货币战争（测试版）', '0')
-        # 新对局入口会先调用 game.start()；该过程会从磁盘重新载入
-        # 常规货币战争设置。必须在游戏启动完成后再次锁定专用配置，
-        # 否则用户的常规“超频博弈”设置会覆盖银狼脚本的标准博弈。
-        overrides = self.activate_silver_wolf_task_config()
-        log.info(
-            "银狼专用配置已在游戏启动后锁定："
-            f"模式={overrides['currencywars_type']}，"
-            f"难度={overrides['currencywars_rank_difficulty']}，"
-            f"策略={overrides['currencywars_strategy']}"
-        )
-        success = self.run_silver_wolf()
-        return self.finish_run(success, preserve_active_run=True)
-
     def finish_run(self, success: bool, preserve_active_run: bool = False) -> bool:
         """处理两种货币战争入口共用的通知与收尾。"""
         if success:
@@ -688,16 +630,6 @@ class CurrencyWars:
                     continue
                 else:
                     return result
-            return False
-
-    def run_silver_wolf(self) -> bool:
-        """从新对局开始运行独立银狼循环。"""
-        while True:
-            if self.start_war(cfg.currencywars_type):
-                result = self.silver_wolf_loop()
-                if self.need_restart:
-                    continue
-                return result
             return False
 
     def get_reward(self):
@@ -4654,11 +4586,18 @@ class CurrencyWars:
         # 重置后排角色列表
         self.backward_characters = []
 
+    def is_supply_phase_screen(self) -> bool:
+        """普通货币战争原有的补给标题识别范围。"""
+        return bool(auto.find_element(
+            "补给阶段", "text", None,
+            crop=(775.0 / 1920, 109.0 / 1080, 368.0 / 1920, 98.0 / 1080),
+        ))
+
     def check_supply_phase(self):
         """
         检查并执行补给阶段操作
         """
-        if auto.find_element(('补给阶段'), 'text', None, crop=(775.0 / 1920, 109.0 / 1080, 368.0 / 1920, 98.0 / 1080)):
+        if self.is_supply_phase_screen():
             log.info(f"检测到补给阶段界面，尝试选择")
             time.sleep(2)
             button_positions = [

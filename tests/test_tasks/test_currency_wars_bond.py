@@ -19,49 +19,16 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertIn("完美投影仪只能给5费银狼使用", rules)
         self.assertIn("银狼升到4费后，不再购买任何非银狼角色", rules)
 
-    def test_dedicated_task_forces_silver_wolf_settings(self):
-        self.module.cfg.currencywars_type = "overclock"
-        self.module.cfg.currencywars_rank_difficulty = "lowest"
-        self.module.cfg.currencywars_silver_wolf_rank_difficulty = "amethyst1"
-        self.module.cfg.currencywars_silver_wolf_completion_goal = "silver_wolf_3star"
-        self.module.cfg.currencywars_strategy = "default"
-        values = self.module.CurrencyWars.activate_silver_wolf_task_config()
-        self.assertEqual(values["currencywars_type"], "normal")
-        self.assertEqual(values["currencywars_rank_difficulty"], "amethyst1")
-        self.assertEqual(values["currencywars_strategy"], "bond")
-        self.assertEqual(values["currencywars_silver_wolf_completion_goal"], "silver_wolf_3star")
-        self.assertEqual(self.module.cfg.currencywars_type, "normal")
-        self.assertEqual(self.module.cfg.currencywars_rank_difficulty, "amethyst1")
-        self.assertEqual(self.module.cfg.currencywars_strategy, "bond")
-
-    def test_dedicated_task_can_keep_current_rank(self):
-        self.module.cfg.currencywars_rank_difficulty = "lowest"
-        self.module.cfg.currencywars_silver_wolf_rank_difficulty = "current"
-        values = self.module.CurrencyWars.activate_silver_wolf_task_config()
-        self.assertEqual(values["currencywars_rank_difficulty"], "current")
-        self.assertEqual(self.module.cfg.currencywars_rank_difficulty, "current")
-
-    def test_dedicated_task_rejects_unknown_completion_goal(self):
-        self.module.cfg.currencywars_silver_wolf_completion_goal = "not_implemented"
-        values = self.module.CurrencyWars.activate_silver_wolf_task_config()
-        self.assertEqual(values["currencywars_silver_wolf_completion_goal"], "silver_wolf_3star")
-        self.assertEqual(self.module.cfg.currencywars_silver_wolf_completion_goal, "silver_wolf_3star")
-
-    def test_silver_wolf_start_reapplies_config_after_game_start_reload(self):
-        # 模拟 game.start() 从磁盘重新载入了用户常规的超频设置。
-        self.module.cfg.currencywars_type = "overclock"
-        self.module.cfg.currencywars_rank_difficulty = "highest"
-        self.module.cfg.currencywars_strategy = "default"
-        self.war.run_silver_wolf = mock.Mock(return_value=False)
-        self.war.finish_run = mock.Mock(return_value=False)
-
-        self.assertFalse(self.war.start_silver_wolf())
-
-        self.assertEqual(self.module.cfg.currencywars_type, "normal")
-        self.assertEqual(self.module.cfg.currencywars_rank_difficulty, "amethyst1")
-        self.assertEqual(self.module.cfg.currencywars_strategy, "bond")
-        self.war.run_silver_wolf.assert_called_once_with()
-        self.war.finish_run.assert_called_once_with(False, preserve_active_run=True)
+    def test_silver_wolf_settings_are_isolated_from_regular_currency_wars(self):
+        source_root = Path(self.module.__file__).resolve().parents[2]
+        silver_source = (source_root / "tasks/weekly/currency_wars_silver_wolf.py").read_text(encoding="utf-8")
+        main_source = (source_root / "main.py").read_text(encoding="utf-8")
+        self.assertIn("class _SilverWolfConfigView", silver_source)
+        self.assertIn("currencywars_silver_wolf_rank_difficulty", silver_source)
+        self.assertIn("currencywars_silver_wolf_completion_goal", silver_source)
+        self.assertNotIn("activate_silver_wolf_task_config", silver_source)
+        self.assertNotIn("activate_silver_wolf_task_config", main_source)
+        self.assertNotIn("cfg.config.update", silver_source)
 
     def test_gm_console_is_checked_before_main_preparation_screen(self):
         source = Path(self.module.__file__).read_text(encoding="utf-8")
@@ -74,22 +41,26 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
     def test_silver_wolf_task_has_an_independent_loop_entry(self):
         source_root = Path(self.module.__file__).resolve().parents[2]
         main_source = (source_root / "main.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "from tasks.weekly.currency_wars_silver_wolf import SilverWolfCurrencyWars",
+            main_source,
+        )
+        self.assertIn(
+            'war = SilverWolfCurrencyWars() if mode == "smart" else CurrencyWars()',
+            main_source,
+        )
         smart_start = main_source.index('elif mode == "smart":')
         smart_source = main_source[
             smart_start:
             main_source.index('        else:\n            war.start()', smart_start)
         ]
-        self.assertIn("war.silver_wolf_loop()", smart_source)
-        self.assertIn("war.start_silver_wolf()", smart_source)
-        self.assertNotIn("success = war.loop()", smart_source)
-        self.assertNotIn("war.start()", smart_source)
+        self.assertIn("success = war.loop()", smart_source)
+        self.assertIn("war.start()", smart_source)
 
     def test_silver_wolf_loop_checks_supply_before_regular_main_screen(self):
-        source = Path(self.module.__file__).read_text(encoding="utf-8")
-        loop_source = source[
-            source.index("    def silver_wolf_loop(self)"):
-            source.index("    def check_resume_exit_confirmation")
-        ]
+        source_root = Path(self.module.__file__).resolve().parents[2]
+        source = (source_root / "tasks/weekly/currency_wars_silver_wolf.py").read_text(encoding="utf-8")
+        loop_source = source[source.index("    def loop(self)"):]
         self.assertLess(
             loop_source.index("self.check_supply_phase()"),
             loop_source.index("self.check_main_screen()"),
@@ -100,10 +71,7 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
 
     def test_regular_loop_remains_separate_from_silver_wolf_loop(self):
         source = Path(self.module.__file__).read_text(encoding="utf-8")
-        regular_loop = source[
-            source.index("    def loop(self)"):
-            source.index("    def silver_wolf_loop(self)")
-        ]
+        regular_loop = source[source.index("    def loop(self)"):source.index("    def check_resume_exit_confirmation")]
         self.assertIn("self.check_main_screen()", regular_loop)
         self.assertIn("self.check_supply_phase", regular_loop)
 
