@@ -526,27 +526,35 @@ class CurrencyWars:
         return None
 
     def ensure_silver_wolf_benched_for_projector(self):
-        """把星级最高的银狼移到备战席并重新确认，之后才允许检查投影仪。"""
-        candidates = []
-        for zone, characters in (
-            ("prepare", self.prepare_characters),
-            ("forward", self.forward_characters),
-            ("backward", self.backward_characters),
-        ):
+        """按原有目标顺序选银狼；若在场上则先下场，再允许检查投影仪。"""
+        if self.silver_wolf_cost == 3:
+            character_groups = (
+                ("prepare", self.prepare_characters),
+                ("forward", self.forward_characters),
+                ("backward", self.backward_characters),
+            )
+        else:
+            character_groups = (
+                ("forward", self.forward_characters),
+                ("backward", self.backward_characters),
+                ("prepare", self.prepare_characters),
+            )
+
+        target_zone = None
+        target_index = None
+        for zone, characters in character_groups:
             for index, char in enumerate(characters):
                 if self._normalize_tracked_character_name(char.name) != "银狼LV.999":
                     continue
-                candidates.append((int(char.level or 1), zone, index))
+                target_zone = zone
+                target_index = index
+                break
+            if target_zone is not None:
+                break
 
-        if not candidates:
+        if target_zone is None:
             log.warning("商店前投影仪检查：未找到银狼，保留投影仪")
             return None
-
-        # 优先星级最高的狼；同星级时优先已在备战席的狼，避免无意义移动。
-        _, target_zone, target_index = max(
-            candidates,
-            key=lambda item: (item[0], item[1] == "prepare"),
-        )
         if target_zone != "prepare":
             while len(self.prepare_characters) < len(self.prepare_pos):
                 self.prepare_characters.append(CurrencyWarsCharacter(None, None))

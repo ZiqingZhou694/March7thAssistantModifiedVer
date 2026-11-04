@@ -646,7 +646,7 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertFalse(self.war.use_bond_silver_wolf_projectors())
         self.war.ensure_silver_wolf_benched_for_projector.assert_not_called()
 
-    def test_projector_moves_highest_star_wolf_to_bench_before_inventory_scan(self):
+    def test_projector_moves_selected_wolf_to_bench_before_inventory_scan(self):
         events = []
         bench_position = object()
         projector_position = object()
@@ -656,7 +656,6 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         ]
         self.war.backward_characters = []
         self.war.prepare_characters = [
-            self.module.CurrencyWarsCharacter("银狼LV.999", "prepare", level=1, money=3),
             self.module.CurrencyWarsCharacter(None, None),
         ]
 
@@ -672,7 +671,7 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
 
         def find_element(target, *args, **kwargs):
             nonlocal projector_reads
-            if target == self.war.prepare_pos[1]:
+            if target == self.war.prepare_pos[0]:
                 events.append("confirm_bench")
                 return bench_position
             if isinstance(target, str) and target.endswith("projector.png"):
@@ -688,7 +687,23 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
 
         self.assertTrue(self.war.use_bond_silver_wolf_projectors())
         self.assertEqual(events[:3], ["move", "confirm_bench", "scan_projector"])
-        self.war.move_character.assert_called_once_with(("forward", 0), ("prepare", 1))
+        self.war.move_character.assert_called_once_with(("forward", 0), ("prepare", 0))
+
+    def test_three_cost_projector_keeps_original_bench_first_target_rule(self):
+        bench_position = object()
+        self.war.silver_wolf_cost = 3
+        self.war.forward_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", "forward", level=2, money=3)
+        ]
+        self.war.prepare_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", "prepare", level=1, money=3)
+        ]
+        self.war.move_character = mock.Mock()
+        self.module.auto.find_element = mock.Mock(return_value=bench_position)
+
+        self.assertIs(self.war.ensure_silver_wolf_benched_for_projector(), bench_position)
+        self.war.move_character.assert_not_called()
+        self.module.auto.find_element.assert_called_once_with(self.war.prepare_pos[0], "crop")
 
     def test_projector_is_kept_when_bench_has_no_empty_slot(self):
         self.war.silver_wolf_cost = 3
