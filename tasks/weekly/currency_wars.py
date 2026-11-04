@@ -435,7 +435,43 @@ class CurrencyWars:
         if visible_copies > self.silver_wolf_copies[self.silver_wolf_cost]:
             self.silver_wolf_copies[self.silver_wolf_cost] = visible_copies
             log.info(f"按队伍实际星级校准银狼进度：{self.silver_wolf_cost}费共{visible_copies}份")
+        if self.silver_wolf_cost == 5 and visible_copies >= 9:
+            self.silver_wolf_three_star = True
+            log.info("从角色详情顶部三星徽标确认：已获得三星5费银狼LV.999")
         return visible_copies
+
+    @staticmethod
+    def classify_character_star_badge(image) -> Optional[int]:
+        """按详情面板顶部金色星徽像素量识别1/2/3星。"""
+        try:
+            normalized = image.resize((70, 30)).convert("RGB")
+            gold_pixels = sum(
+                1 for red, green, blue in normalized.getdata()
+                if red > 140 and green > 70
+                and red > blue * 1.2 and green > blue * 1.05
+            )
+        except Exception:
+            return None
+        if gold_pixels >= 500:
+            return 3
+        if gold_pixels >= 300:
+            return 2
+        if gold_pixels >= 100:
+            return 1
+        return None
+
+    def detect_character_star_level(self) -> Optional[int]:
+        """读取角色详情顶部星徽；固定归一化尺寸，避免把生命值数字当星级。"""
+        # 1920×1080实机全屏图：三星徽标位于 x=1598..1650, y=167..185。
+        # 略向外扩展以容纳抗锯齿光晕，再统一缩放为70×30做颜色统计。
+        star_badge_crop = (1590 / 1920, 160 / 1080, 68 / 1920, 30 / 1080)
+        auto.take_screenshot(star_badge_crop)
+        level = self.classify_character_star_badge(auto.screenshot)
+        if level is not None:
+            log.info(f"角色详情顶部星徽识别为{level}星")
+        else:
+            log.warning("角色详情顶部星徽未能识别")
+        return level
 
     def reset_tracked_characters(self):
         self.character_flags.clear()
@@ -4171,9 +4207,19 @@ class CurrencyWars:
             if not money or not money.isdigit():
                 log.error(f"无法识别角色 {name} 的费用信息，默认为 1")
                 money = "1"
-            level_text = auto.get_single_line_text(crop=char_level_crop)
-            level_match = re.search(r"([123])", level_text or "")
-            level = int(level_match.group(1)) if level_match else 1
+            normalized_name = self._normalize_tracked_character_name(name)
+            if cfg.currencywars_strategy == "bond" and normalized_name == "银狼LV.999":
+                level = self.detect_character_star_level()
+                if level is None:
+                    # 未识别时只作保守1星处理，并把旧OCR原文写入日志辅助校准；
+                    # 旧坐标位于生命值区域，禁止再从生命值中的1/2/3猜星级。
+                    level_text = auto.get_single_line_text(crop=char_level_crop)
+                    log.warning(f"银狼星级徽标识别失败；旧区域OCR={level_text!r}，暂按1星")
+                    level = 1
+            else:
+                level_text = auto.get_single_line_text(crop=char_level_crop)
+                level_match = re.search(r"([123])", level_text or "")
+                level = int(level_match.group(1)) if level_match else 1
             log.info(
                 f"识别到角色：{name}，站位：{self.pos_name_localization[cpos]}，"
                 f"星级：{level}，费用：{money}"
