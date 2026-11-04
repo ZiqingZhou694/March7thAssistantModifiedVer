@@ -420,7 +420,7 @@ def run_sub_task(action):
             if war.is_currency_wars_active_screen():
                 log.info("检测到当前处于货币战争对局，启用中途托管")
                 war.mid_run_attach = True
-                success = war.loop()
+                success = war.silver_wolf_loop()
                 if success and war.silver_wolf_target_completed:
                     from tasks.base.base import Base
                     Base.send_notification_with_screenshot(
@@ -432,7 +432,7 @@ def run_sub_task(action):
             else:
                 log.info("当前不是货币战争对局画面，按正常流程进入并开始新对局")
                 game.start()
-                war.start()
+                war.start_silver_wolf()
         else:
             war.start()
 

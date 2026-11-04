@@ -612,6 +612,16 @@ class CurrencyWars:
     def start(self) -> bool:
         log.hr('准备货币战争', '0')
         success = self.run()
+        return self.finish_run(success)
+
+    def start_silver_wolf(self) -> bool:
+        """运行独立银狼脚本，不经过普通货币战争的主循环。"""
+        log.hr('准备银狼货币战争（测试版）', '0')
+        success = self.run_silver_wolf()
+        return self.finish_run(success, preserve_active_run=True)
+
+    def finish_run(self, success: bool, preserve_active_run: bool = False) -> bool:
+        """处理两种货币战争入口共用的通知与收尾。"""
         if success:
             if self.silver_wolf_manual_checkpoint_reached:
                 title = "银狼合成材料已齐，请手动合成三星五费"
@@ -622,6 +632,9 @@ class CurrencyWars:
         else:
             Base.send_notification_with_screenshot("货币战争未完成", NotificationLevel.ERROR, self.screenshot)
             self.screenshot = None
+        if preserve_active_run and not success:
+            log.warning("银狼专用任务已安全停止并保留当前对局，不进入普通结算或领奖流程")
+            return False
         if self.silver_wolf_target_completed or self.silver_wolf_manual_checkpoint_reached:
             log.info("银狼目标或人工保险停止点已达到并暂时离开对局，不再进入结算或领奖界面")
             return True
@@ -665,6 +678,16 @@ class CurrencyWars:
                     continue
                 else:
                     return result
+            return False
+
+    def run_silver_wolf(self) -> bool:
+        """从新对局开始运行独立银狼循环。"""
+        while True:
+            if self.start_war(cfg.currencywars_type):
+                result = self.silver_wolf_loop()
+                if self.need_restart:
+                    continue
+                return result
             return False
 
     def get_reward(self):
@@ -1009,6 +1032,130 @@ class CurrencyWars:
                 last_activity = now
             elif now - last_activity >= 300:
                 self.abort_run("货币战争连续5分钟未识别到可处理界面或战斗画面，停止任务")
+            time.sleep(4)
+
+    def silver_wolf_loop(self) -> bool:
+        """银狼货币战争专用主循环。
+
+        与普通 ``loop`` 分离：补给页面必须在普通备战/商店页面之前处理，
+        命中后立即短路本轮检测，避免补给画面的“备战阶段”文字抢先触发
+        普通商店逻辑。异常时保留当前对局，不执行放弃结算。
+        """
+        self.screenshot = None
+        self.result = None
+        self.peipei_count = 0
+        self.diamond_count = 0
+        self.current_level = 0
+        self.current_stage = "0-0"
+        self.need_exit = False
+        self._stage_unchanged_count = 0
+        self._unrecognized_stage_count = 0
+        self.need_restart = False
+        self.safe_stop_requested = False
+        self._opening_has_erosion = False
+        self.forward_characters = []
+        self.backward_characters = []
+        self.prepare_characters = []
+        self.reset_tracked_characters()
+        self.has_aglaea_three_star = False
+        self.allow_buy_experience = False
+        self.allow_equip_weapons = False
+        self.propeller_count = 0
+        self.shoe_count = 0
+        self.has_seele = False
+        self.has_seele_three_star = False
+        self.seele_firestorm_count = 0
+        self.seele_chainsaw_count = 0
+        self.allow_seele_equip_weapons = False
+        self.has_bond_emblem = False
+        self.bond_opening_route = None
+        self.opening_environment_name = None
+        self.bond_opening_samples = []
+        self.bond_collection_unlocked = False
+        self.bond_core_purchase_counts = {name: 0 for name in self.BOND_ECONOMY_CORE}
+        self.silver_wolf_cost = 3
+        self.silver_wolf_copies = {3: 0, 4: 0, 5: 0}
+        self.silver_wolf_shop_upgrade_pending = False
+        self.silver_wolf_three_star = False
+        self.silver_wolf_data_copier = False
+        self.silver_wolf_target_completed = False
+        self.silver_wolf_manual_checkpoint_reached = False
+        self.investment_strategy_count = 0
+        self.seele_missing_basic_equips = set()
+        self.update_backward()
+
+        start_time = time.monotonic()
+        last_activity = start_time
+        self._last_battle_keepalive = start_time
+        timeout = 60 * 120
+        while True:
+            if time.monotonic() - start_time > timeout:
+                self.abort_run("银狼货币战争主循环超时（120分钟），停止任务")
+
+            if cfg.cloud_game_enable:
+                self.check_connection()
+            active = False
+            try:
+                # GM操作台覆盖在备战画面上，必须最先处理。
+                if self.check_silver_wolf_gm_console():
+                    active = True
+                    if self.silver_wolf_target_completed:
+                        return True
+                    if self.safe_stop_requested:
+                        log.warning("GM操作台处理未满足确认条件，已安全停止并保留当前画面")
+                        return False
+                    time.sleep(1)
+                    continue
+
+                # 补给卡面同时含有“备战阶段”，因此必须先于普通主界面检测，
+                # 并在处理完成后短路本轮，绝不再落入商店逻辑。
+                if self.check_supply_phase():
+                    active = True
+                    if self.silver_wolf_target_completed:
+                        return True
+                    time.sleep(1)
+                    continue
+
+                if self.check_resume_exit_confirmation():
+                    active = True
+                    time.sleep(1)
+                    continue
+
+                active = (self.check_main_screen() is True) or active
+                if self.safe_stop_requested:
+                    log.warning("银狼中途托管状态校验失败，已安全停止；不会放弃或结算当前对局")
+                    return False
+            except Exception as e:
+                log.error(f"银狼货币战争专用循环出现异常：{e}，已安全停止并保留当前对局")
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                os.makedirs("./debug", exist_ok=True)
+                debug_path = f"./debug/silver_wolf_loop_exception_{timestamp}.png"
+                auto.take_screenshot()
+                auto.screenshot.save(debug_path)
+                log.error(f"已保存调试截图至 {debug_path}；专用循环不会放弃或结算当前对局")
+                return False
+
+            for check in (self.check_investment_environment, self.check_auto_battle,
+                          self.check_click_continue):
+                active = (check() is True) or active
+                if self.silver_wolf_target_completed:
+                    return True
+            if self.check_return_home():
+                end_time = time.monotonic()
+                elapsed_time = end_time - start_time
+                minutes = int(elapsed_time // 60)
+                seconds = int(elapsed_time % 60)
+                log.info(f"本次银狼货币战争用时：{minutes} 分钟 {seconds} 秒")
+                return self.result if self.result is not None else False
+
+            now = time.monotonic()
+            if active:
+                last_activity = now
+                self._last_battle_keepalive = now
+            elif self.check_battle_keepalive():
+                last_activity = now
+            elif now - last_activity >= 300:
+                self.abort_run("银狼货币战争连续5分钟未识别到可处理界面或战斗画面，停止任务")
             time.sleep(4)
 
     def check_resume_exit_confirmation(self) -> bool:

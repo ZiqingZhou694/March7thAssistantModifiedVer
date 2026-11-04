@@ -55,6 +55,42 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
             loop_source.index("self.check_main_screen()"),
         )
 
+    def test_silver_wolf_task_has_an_independent_loop_entry(self):
+        source_root = Path(self.module.__file__).resolve().parents[2]
+        main_source = (source_root / "main.py").read_text(encoding="utf-8")
+        smart_start = main_source.index('elif mode == "smart":')
+        smart_source = main_source[
+            smart_start:
+            main_source.index('        else:\n            war.start()', smart_start)
+        ]
+        self.assertIn("war.silver_wolf_loop()", smart_source)
+        self.assertIn("war.start_silver_wolf()", smart_source)
+        self.assertNotIn("success = war.loop()", smart_source)
+        self.assertNotIn("war.start()", smart_source)
+
+    def test_silver_wolf_loop_checks_supply_before_regular_main_screen(self):
+        source = Path(self.module.__file__).read_text(encoding="utf-8")
+        loop_source = source[
+            source.index("    def silver_wolf_loop(self)"):
+            source.index("    def check_resume_exit_confirmation")
+        ]
+        self.assertLess(
+            loop_source.index("self.check_supply_phase()"),
+            loop_source.index("self.check_main_screen()"),
+        )
+        tail_checks = loop_source[loop_source.index("for check in ("):]
+        self.assertNotIn("self.check_supply_phase", tail_checks)
+        self.assertNotIn("self.give_up_and_settle()", loop_source)
+
+    def test_regular_loop_remains_separate_from_silver_wolf_loop(self):
+        source = Path(self.module.__file__).read_text(encoding="utf-8")
+        regular_loop = source[
+            source.index("    def loop(self)"):
+            source.index("    def silver_wolf_loop(self)")
+        ]
+        self.assertIn("self.check_main_screen()", regular_loop)
+        self.assertIn("self.check_supply_phase", regular_loop)
+
     def chars(self, *names):
         return [self.module.CurrencyWarsCharacter(name) for name in names]
 
