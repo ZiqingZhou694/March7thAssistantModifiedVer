@@ -25,7 +25,8 @@ class CurrencyWars:
     # 昔涟虽属于夜之半神，但本银狼刷取路线明确禁用，避免占用经济和部署位。
     NIGHT_DEMIGOD_MEMBERS = ("赛飞儿", "万敌", "丹恒•腾荒", "丹恒·腾荒", "刻律德菈", "遐蝶", "长夜月")
     SKILL_POINT_MEMBERS = ("远坂凛", "火花", "Archer", "刻律德菈", "丹恒•饮月", "丹恒·饮月", "花火", "青雀")
-    BOND_TRANSITION_HEALERS = ("风堇", "藿藿", "灵砂", "罗刹", "白露", "娜塔莎", "加拉赫")
+    # 银狼路线只占一个生存位；顺序同时也是替换优先级。
+    BOND_TRANSITION_HEALERS = ("藿藿", "风堇", "灵砂", "罗刹", "白露", "娜塔莎", "加拉赫")
     BOND_PRIMARY_HEALERS = ("藿藿", "风堇")
     BOND_ECONOMY_CORE = ("银狼LV.999",)
     BOND_OPENING_ENVIRONMENTS = (
@@ -301,7 +302,7 @@ class CurrencyWars:
         return True
 
     def get_preferred_bond_healer(self, characters=None) -> Optional[str]:
-        """治疗只留一位：风堇、藿藿优先，其余治疗按费用择优。"""
+        """生存位只留一位：藿藿、风堇优先，其余治疗按费用择优。"""
         if characters is None:
             characters = self.forward_characters + self.backward_characters + self.prepare_characters
         healers = [
@@ -320,6 +321,32 @@ class CurrencyWars:
             ),
         )
         return self._normalize_tracked_character_name(best.name)
+
+    def should_take_bond_healer(
+        self, candidate: Optional[str], current: Optional[str] = None
+    ) -> bool:
+        """仅在没有生存位或候选能升级当前生存位时接纳新治疗。"""
+        candidate = self._normalize_tracked_character_name(candidate)
+        current = self._normalize_tracked_character_name(current)
+        if candidate not in self.BOND_TRANSITION_HEALERS:
+            return False
+        if current not in self.BOND_TRANSITION_HEALERS:
+            return True
+        if candidate == current:
+            return False
+        priority = {
+            name: len(self.BOND_TRANSITION_HEALERS) - index
+            for index, name in enumerate(self.BOND_TRANSITION_HEALERS)
+        }
+        return priority[candidate] > priority[current]
+
+    def get_bond_healer_upgrade_candidates(self) -> tuple[str, ...]:
+        """返回当前唯一生存位允许接纳的候选，供商店和补给共用。"""
+        current = self.get_preferred_bond_healer()
+        return tuple(
+            name for name in self.BOND_TRANSITION_HEALERS
+            if self.should_take_bond_healer(name, current)
+        )
 
     def sample_bond_opening_route(self) -> Optional[str]:
         """1-1~1-3观察四系；到1-3后只锁定人数最多且至少2人的单羁绊。"""
@@ -1626,11 +1653,9 @@ class CurrencyWars:
                     for name in priorities:
                         if name in self.BOND_ECONOMY_CORE or not self.can_afford_character(current_money, name):
                             continue
-                        if name in self.BOND_TRANSITION_HEALERS:
-                            if selected_healer in self.BOND_PRIMARY_HEALERS:
-                                continue
-                            if selected_healer and name not in self.BOND_PRIMARY_HEALERS:
-                                continue
+                        if (name in self.BOND_TRANSITION_HEALERS
+                                and not self.should_take_bond_healer(name, selected_healer)):
+                            continue
                         if self.try_buy_character(name):
                             bought_name = name
                             if not self.bond_opening_route:
@@ -4763,11 +4788,11 @@ class CurrencyWars:
                         time.sleep(2)
                         continue
 
+                    healer_upgrades = self.get_bond_healer_upgrade_candidates()
                     priority_groups = [
                         self.get_bond_route_members() or self.get_all_opening_route_members(),
                         self.SURVIVAL_CARRIES,
-                        self.BOND_PRIMARY_HEALERS,
-                        self.BOND_TRANSITION_HEALERS,
+                        healer_upgrades,
                         self.HIMEKO_SUPPORT_MEMBERS,
                     ]
                     matched_index = None

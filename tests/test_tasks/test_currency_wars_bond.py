@@ -394,6 +394,16 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         characters[1].money = 4
         self.assertEqual(self.war.get_preferred_bond_healer(characters), "灵砂")
 
+    def test_only_accepts_a_better_single_survival_slot(self):
+        self.assertFalse(self.war.should_take_bond_healer("灵砂", "风堇"))
+        self.assertFalse(self.war.should_take_bond_healer("风堇", "风堇"))
+        self.assertTrue(self.war.should_take_bond_healer("藿藿", "风堇"))
+        self.assertTrue(self.war.should_take_bond_healer("加拉赫", None))
+
+    def test_supply_survival_candidates_only_include_upgrades(self):
+        self.war.forward_characters = self.chars("风堇")
+        self.assertEqual(self.war.get_bond_healer_upgrade_candidates(), ("藿藿",))
+
     def test_collection_stays_locked_before_plane_three(self):
         self.war.current_stage = "1-6"
         self.war.current_level = 10
