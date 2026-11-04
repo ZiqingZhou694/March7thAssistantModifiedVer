@@ -261,17 +261,39 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.war.silver_wolf_cost = 4
         self.assertFalse(self.war.should_buy_bond_transition_characters())
 
-    def test_manual_five_cost_silver_wolf_checkpoint(self):
-        two_star = self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5)
+    def test_manual_five_cost_silver_wolf_checkpoint_requires_eight_board_copies(self):
+        two_star_a = self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5)
+        two_star_b = self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5)
         one_star_a = self.module.CurrencyWarsCharacter("银狼LV.999", level=1, money=5)
         one_star_b = self.module.CurrencyWarsCharacter("银狼LV.999", level=1, money=5)
-        self.war.forward_characters = [two_star]
+        self.war.forward_characters = [two_star_a, two_star_b]
         self.war.prepare_characters = [one_star_a, one_star_b]
-        self.assertTrue(self.war.has_silver_wolf_manual_checkpoint())
-        self.war.prepare_characters.pop()
-        self.assertFalse(self.war.has_silver_wolf_manual_checkpoint())
+        self.assertTrue(self.war.has_silver_wolf_final_purchase_ready())
+        self.war.forward_characters.pop()
+        self.assertFalse(self.war.has_silver_wolf_final_purchase_ready())
         self.war.silver_wolf_cost = 5
         self.assertFalse(self.war.should_buy_bond_transition_characters())
+
+    def test_final_shop_stops_before_buying_ninth_lv999_copy(self):
+        self.war.silver_wolf_cost = 5
+        self.war.forward_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5),
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=2, money=5),
+        ]
+        self.war.prepare_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=1, money=5),
+            self.module.CurrencyWarsCharacter("银狼LV.999", level=1, money=5),
+        ]
+        self.war.check_money = mock.Mock(return_value=20)
+        self.war._get_ocr_texts_in_crop = mock.Mock(return_value=["银狼LV.999"])
+        self.war.try_buy_character = mock.Mock(return_value=True)
+        self.module.auto.click_element = mock.Mock(return_value=True)
+
+        self.assertTrue(self.war.buy_silver_wolf_all_in())
+
+        self.assertTrue(self.war.silver_wolf_manual_checkpoint_reached)
+        self.war.try_buy_character.assert_not_called()
+        self.assertFalse(self.war.silver_wolf_three_star)
 
     def test_success_checkpoint_clicks_right_temporary_leave_action(self):
         self.module.auto.press_key = mock.Mock()
@@ -367,11 +389,10 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.war.silver_wolf_cost = 5
         self.war.silver_wolf_copies[5] = 8
         self.war.check_money = mock.Mock(return_value=20)
-        self.war.check_shop_refresh_cost = mock.Mock(return_value=2)
         self.war._get_ocr_texts_in_crop = mock.Mock(
             side_effect=[["黑塔"], ["银狼LV.999"]]
         )
-        self.war.has_silver_wolf_manual_checkpoint = mock.Mock(return_value=False)
+        self.war.has_silver_wolf_final_purchase_ready = mock.Mock(return_value=False)
         self.war.try_buy_character = mock.Mock(return_value=True)
         self.module.auto.click_element = mock.Mock(return_value=True)
         self.module.auto.press_key = mock.Mock()
@@ -380,29 +401,27 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.war.try_buy_character.assert_called()
         self.assertTrue(self.war.silver_wolf_three_star)
 
-    def test_final_all_in_uses_detected_refresh_cost_and_real_money(self):
+    def test_final_all_in_restarts_at_five_money_without_lv999_in_shop(self):
         self.war.silver_wolf_cost = 5
         self.war.silver_wolf_copies[5] = 8
-        # 初始6金；刷新按钮显示1金，刷新后画面仍有5金。
-        self.war.check_money = mock.Mock(side_effect=[6, 6, 5, 5])
-        self.war.check_shop_refresh_cost = mock.Mock(return_value=1)
-        self.war._get_ocr_texts_in_crop = mock.Mock(
-            side_effect=[["黑塔"], ["银狼LV.999"]]
-        )
-        self.war.has_silver_wolf_manual_checkpoint = mock.Mock(return_value=False)
-        self.war.try_buy_character = mock.Mock(return_value=True)
+        self.war.check_money = mock.Mock(side_effect=[5, 5])
+        self.war.check_shop_refresh_cost = mock.Mock()
+        self.war._get_ocr_texts_in_crop = mock.Mock(return_value=["黑塔"])
+        self.war.has_silver_wolf_final_purchase_ready = mock.Mock(return_value=False)
+        self.war.try_buy_character = mock.Mock(return_value=False)
         self.module.auto.click_element = mock.Mock(return_value=True)
         self.module.auto.press_key = mock.Mock()
         self.war.buy_silver_wolf_all_in()
-        self.module.auto.press_key.assert_called_once_with("d")
-        self.assertTrue(self.war.silver_wolf_three_star)
+        self.assertTrue(self.war.need_restart)
+        self.module.auto.press_key.assert_not_called()
+        self.war.check_shop_refresh_cost.assert_not_called()
 
     def test_final_all_in_handles_planner_popup_before_declaring_completion(self):
         self.war.silver_wolf_cost = 5
         self.war.silver_wolf_copies[5] = 7
         self.war.check_money = mock.Mock(return_value=20)
         self.war._get_ocr_texts_in_crop = mock.Mock(return_value=["银狼LV.999"])
-        self.war.has_silver_wolf_manual_checkpoint = mock.Mock(return_value=False)
+        self.war.has_silver_wolf_final_purchase_ready = mock.Mock(return_value=False)
         self.war.try_buy_character = mock.Mock(return_value=True)
         self.module.auto.get_single_line_text = mock.Mock(
             side_effect=["", "我来当策划"]
@@ -419,14 +438,6 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertTrue(self.war.buy_silver_wolf_all_in())
         self.war.choose_silver_wolf_planner_option.assert_called_once()
         self.assertTrue(self.war.silver_wolf_three_star)
-
-    def test_shop_refresh_cost_is_read_directly_from_button(self):
-        self.module.auto.get_single_line_text = mock.Mock(return_value="1")
-        self.assertEqual(self.war.check_shop_refresh_cost(), 1)
-
-    def test_unknown_shop_refresh_cost_is_not_assumed_to_be_one(self):
-        self.module.auto.get_single_line_text = mock.Mock(return_value="?")
-        self.assertIsNone(self.war.check_shop_refresh_cost())
 
     def test_mid_run_scan_restores_five_cost_wolf_and_visible_copies(self):
         self.module.cfg.currencywars_strategy = "bond"
