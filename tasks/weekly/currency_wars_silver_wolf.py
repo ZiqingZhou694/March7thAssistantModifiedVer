@@ -178,7 +178,7 @@ class SilverWolfCurrencyWars(CurrencyWars):
             if time.monotonic() - start_time > timeout:
                 self.abort_run("银狼货币战争主循环超时（120分钟），停止任务")
 
-            if cfg.cloud_game_enable:
+            if self.task_config.cloud_game_enable:
                 self.check_connection()
             active = False
             try:

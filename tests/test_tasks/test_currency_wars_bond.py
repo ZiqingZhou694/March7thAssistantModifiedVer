@@ -1,4 +1,5 @@
 import unittest
+import ast
 from unittest import mock
 from pathlib import Path
 
@@ -29,6 +30,14 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertNotIn("activate_silver_wolf_task_config", silver_source)
         self.assertNotIn("activate_silver_wolf_task_config", main_source)
         self.assertNotIn("cfg.config.update", silver_source)
+        tree = ast.parse(silver_source)
+        bare_cfg_reads = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == "cfg"
+        ]
+        self.assertEqual(bare_cfg_reads, [], "银狼隔离脚本不得读取未定义或普通的 cfg")
 
     def test_gm_console_is_checked_before_main_preparation_screen(self):
         source = Path(self.module.__file__).read_text(encoding="utf-8")
@@ -563,20 +572,17 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertFalse(self.war.has_bond_emblem)
         self.module.auto.click_element.assert_not_called()
 
-    def test_projector_and_recommended_equipment_prioritize_silver_wolf(self):
+    def test_recommended_equipment_does_not_rescan_projector(self):
         silver_wolf_position = object()
-        projector_position = object()
         self.war.find_silver_wolf_projector_position = mock.Mock(return_value=silver_wolf_position)
-        self.module.auto.find_element = mock.Mock(side_effect=[projector_position, None, None])
+        self.war.use_bond_silver_wolf_projectors = mock.Mock()
         self.module.auto.click_element_with_pos = mock.Mock()
         self.module.auto.click_element = mock.Mock(return_value=False)
-        self.module.auto.mouse_up = mock.Mock()
         self.war.click_origin = mock.Mock()
 
         self.war.silver_wolf_cost = 5
-        self.assertTrue(self.war.equip_bond_silver_wolf())
-        self.module.auto.click_element_with_pos.assert_any_call(projector_position, action="down")
-        self.module.auto.click_element_with_pos.assert_any_call(silver_wolf_position, action="move")
+        self.assertFalse(self.war.equip_bond_silver_wolf())
+        self.war.use_bond_silver_wolf_projectors.assert_not_called()
         self.module.auto.click_element_with_pos.assert_any_call(silver_wolf_position)
         self.module.auto.click_element.assert_called_with(
             "装备推荐", "text",
@@ -586,14 +592,14 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
     def test_employee_projector_is_used_only_for_three_cost_wolf(self):
         silver_wolf_position = object()
         projector_position = object()
-        self.war.find_silver_wolf_projector_position = mock.Mock(return_value=silver_wolf_position)
+        self.war.ensure_silver_wolf_benched_for_projector = mock.Mock(return_value=silver_wolf_position)
         self.module.auto.find_element = mock.Mock(side_effect=[projector_position, None])
         self.module.auto.click_element_with_pos = mock.Mock()
         self.module.auto.click_element = mock.Mock(return_value=False)
         self.module.auto.mouse_up = mock.Mock()
         self.war.click_origin = mock.Mock()
         self.war.silver_wolf_cost = 3
-        self.assertTrue(self.war.equip_bond_silver_wolf())
+        self.assertTrue(self.war.use_bond_silver_wolf_projectors())
         first_image = self.module.auto.find_element.call_args_list[0].args[0]
         self.assertTrue(first_image.endswith("projector.png"))
 
@@ -620,7 +626,7 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         silver_wolf_position = object()
         projector_position = object()
         self.war.silver_wolf_cost = 3
-        self.war.find_silver_wolf_projector_position = mock.Mock(return_value=silver_wolf_position)
+        self.war.ensure_silver_wolf_benched_for_projector = mock.Mock(return_value=silver_wolf_position)
         self.module.auto.find_element = mock.Mock(
             side_effect=[projector_position, projector_position, None]
         )
@@ -631,13 +637,73 @@ class TestCurrencyWarsBondStrategy(unittest.TestCase):
         self.assertEqual(self.module.auto.take_screenshot.call_count, 2)
 
     def test_projector_is_never_used_for_four_cost_wolf(self):
-        self.war.find_silver_wolf_projector_position = mock.Mock(return_value=object())
+        self.war.ensure_silver_wolf_benched_for_projector = mock.Mock(return_value=object())
         self.module.auto.find_element = mock.Mock(return_value=object())
         self.module.auto.click_element = mock.Mock(return_value=False)
         self.module.auto.click_element_with_pos = mock.Mock()
         self.war.click_origin = mock.Mock()
         self.war.silver_wolf_cost = 4
-        self.assertFalse(self.war.equip_bond_silver_wolf())
+        self.assertFalse(self.war.use_bond_silver_wolf_projectors())
+        self.war.ensure_silver_wolf_benched_for_projector.assert_not_called()
+
+    def test_projector_moves_highest_star_wolf_to_bench_before_inventory_scan(self):
+        events = []
+        bench_position = object()
+        projector_position = object()
+        self.war.silver_wolf_cost = 3
+        self.war.forward_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", "forward", level=2, money=3)
+        ]
+        self.war.backward_characters = []
+        self.war.prepare_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", "prepare", level=1, money=3),
+            self.module.CurrencyWarsCharacter(None, None),
+        ]
+
+        def move_character(src, dst):
+            events.append("move")
+            source = self.war.forward_characters[src[1]]
+            target = self.war.prepare_characters[dst[1]]
+            self.war.forward_characters[src[1]] = target
+            self.war.prepare_characters[dst[1]] = source
+            return True
+
+        projector_reads = 0
+
+        def find_element(target, *args, **kwargs):
+            nonlocal projector_reads
+            if target == self.war.prepare_pos[1]:
+                events.append("confirm_bench")
+                return bench_position
+            if isinstance(target, str) and target.endswith("projector.png"):
+                events.append("scan_projector")
+                projector_reads += 1
+                return projector_position if projector_reads == 1 else None
+            return None
+
+        self.war.move_character = mock.Mock(side_effect=move_character)
+        self.module.auto.find_element = mock.Mock(side_effect=find_element)
+        self.module.auto.click_element_with_pos = mock.Mock()
+        self.module.auto.mouse_up = mock.Mock()
+
+        self.assertTrue(self.war.use_bond_silver_wolf_projectors())
+        self.assertEqual(events[:3], ["move", "confirm_bench", "scan_projector"])
+        self.war.move_character.assert_called_once_with(("forward", 0), ("prepare", 1))
+
+    def test_projector_is_kept_when_bench_has_no_empty_slot(self):
+        self.war.silver_wolf_cost = 3
+        self.war.forward_characters = [
+            self.module.CurrencyWarsCharacter("银狼LV.999", "forward", level=2, money=3)
+        ]
+        self.war.prepare_characters = [
+            self.module.CurrencyWarsCharacter(f"占位{index}", "prepare")
+            for index in range(len(self.war.prepare_pos))
+        ]
+        self.war.move_character = mock.Mock()
+        self.module.auto.find_element = mock.Mock()
+
+        self.assertFalse(self.war.use_bond_silver_wolf_projectors())
+        self.war.move_character.assert_not_called()
         self.module.auto.find_element.assert_not_called()
 
     def test_silver_wolf_cost_is_dynamic_for_bond_strategy(self):

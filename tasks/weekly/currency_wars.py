@@ -525,6 +525,56 @@ class CurrencyWars:
                     return position
         return None
 
+    def ensure_silver_wolf_benched_for_projector(self):
+        """把星级最高的银狼移到备战席并重新确认，之后才允许检查投影仪。"""
+        candidates = []
+        for zone, characters in (
+            ("prepare", self.prepare_characters),
+            ("forward", self.forward_characters),
+            ("backward", self.backward_characters),
+        ):
+            for index, char in enumerate(characters):
+                if self._normalize_tracked_character_name(char.name) != "银狼LV.999":
+                    continue
+                candidates.append((int(char.level or 1), zone, index))
+
+        if not candidates:
+            log.warning("商店前投影仪检查：未找到银狼，保留投影仪")
+            return None
+
+        # 优先星级最高的狼；同星级时优先已在备战席的狼，避免无意义移动。
+        _, target_zone, target_index = max(
+            candidates,
+            key=lambda item: (item[0], item[1] == "prepare"),
+        )
+        if target_zone != "prepare":
+            while len(self.prepare_characters) < len(self.prepare_pos):
+                self.prepare_characters.append(CurrencyWarsCharacter(None, None))
+            empty_index = next(
+                (index for index, char in enumerate(self.prepare_characters) if not char.name),
+                None,
+            )
+            if empty_index is None:
+                log.warning("商店前投影仪检查：备战席没有空位，无法让银狼下场；保留投影仪")
+                return None
+            log.info(
+                f"商店前投影仪检查：先将{target_zone}第{target_index + 1}格的银狼"
+                f"移到备战席第{empty_index + 1}格"
+            )
+            if not self.move_character(
+                (target_zone, target_index), ("prepare", empty_index)
+            ):
+                log.warning("商店前投影仪检查：银狼下场失败，保留投影仪")
+                return None
+            target_index = empty_index
+
+        target = auto.find_element(self.prepare_pos[target_index], "crop")
+        if not target:
+            log.warning("商店前投影仪检查：银狼下场后未能确认备战席位置，保留投影仪")
+            return None
+        log.info(f"商店前投影仪检查：已确认银狼位于备战席第{target_index + 1}格")
+        return target
+
     def should_keep_silver_wolf_benched(self, char) -> bool:
         """普通配队绝不能部署等待商店同费狼的二星3/4费银狼。"""
         return (
@@ -2677,16 +2727,16 @@ class CurrencyWars:
         return False
 
     def use_bond_silver_wolf_projectors(self) -> bool:
-        """奖励后立即把当前费用允许使用的全部投影仪复制给银狼。"""
+        """商店前先让银狼下场，再检查并使用当前费用允许的全部投影仪。"""
         if self.silver_wolf_cost not in (3, 5):
             log.info(f"奖励后投影仪检查：当前银狼为{self.silver_wolf_cost}费，规则不使用投影仪")
             return False
 
         label = "员工投影仪" if self.silver_wolf_cost == 3 else "完美投影仪"
-        log.info(f"奖励后投影仪检查：寻找{self.silver_wolf_cost}费银狼和{label}")
-        silver_wolf_position = self.find_silver_wolf_projector_position()
+        log.info(f"商店前投影仪检查：先让{self.silver_wolf_cost}费银狼下场，再检查{label}")
+        silver_wolf_position = self.ensure_silver_wolf_benched_for_projector()
         if not silver_wolf_position:
-            log.warning(f"奖励后投影仪检查：未找到{self.silver_wolf_cost}费银狼目标，暂不使用{label}")
+            log.warning(f"商店前投影仪检查：银狼未确认在备战席，暂不检查或使用{label}")
             return False
 
         equip_crop = (1386 / 1920, 93 / 1080, 514 / 1920, 610 / 1080)
@@ -2736,11 +2786,10 @@ class CurrencyWars:
         return used_projector
 
     def equip_bond_silver_wolf(self) -> bool:
-        """再次补扫投影仪，并为银狼合成/穿戴普通推荐装备提高过渡战力。"""
-        used_projector = self.use_bond_silver_wolf_projectors()
+        """为银狼合成/穿戴普通推荐装备；投影仪只在商店前处理一次。"""
         silver_wolf_position = self.find_silver_wolf_projector_position()
         if not silver_wolf_position:
-            return used_projector
+            return False
 
         # 这里只处理银狼的普通推荐装备；银河学者星徽由独立的装备栏合成逻辑负责。
         log.info("为银狼LV.999合成并穿戴普通推荐装备，提高前期首领战生存与输出")
@@ -2759,7 +2808,7 @@ class CurrencyWars:
             ):
                 time.sleep(0.5)
         self.click_origin()
-        return used_projector
+        return False
 
     def equip_bond_transition_team(self) -> None:
         """为已部署的银河成员和唯一治疗合成/穿戴普通推荐装备。"""
