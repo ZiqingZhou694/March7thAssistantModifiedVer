@@ -1,0 +1,584 @@
+import os
+import sys
+import time
+import psutil
+
+
+from app.tools.account_manager import load_acc_and_pwd
+from utils.registry.gameaccount import gamereg_uid
+from .starrailcontroller import StarRailController
+
+from utils.date import Date
+from utils.console import pause_on_success
+from tasks.power.power import Power
+from module.game import cloud_game, get_game_controller
+from module.game.cloud import CloudGameLoginTimeoutError, CloudGameZeroDurationError
+from module.logger import log
+from module.screen import screen
+from module.automation import auto
+from module.automation.background_input import WINDOW_WAIT_SECONDS, GameWindowLost, InputInterrupted
+from module.config import cfg
+from module.notification import notif
+from module.notification.notification import NotificationLevel
+from tasks.base.base import Base
+from module.ocr import ocr
+from module.localization import tr
+from utils.console import is_gui_started
+from utils.runs import describe_run, idle_without_run_lock
+
+
+class GameClientOutdatedError(RuntimeError):
+    """游戏客户端版本过低（供 except 类型判断，勿用文本匹配异常消息）。"""
+
+
+def wait_until(condition, timeout, period=1):
+    """等待直到条件满足或超时"""
+    end_time = time.monotonic() + timeout
+    while time.monotonic() < end_time:
+        if condition():
+            return True
+        time.sleep(period)
+    return False
+
+
+def start():
+    log.hr("开始运行", 0)
+    start_game()
+    log.hr("完成", 2)
+
+
+def switch_to_game():
+    log.hr("切换到游戏窗口", 0)
+    starrail = StarRailController(cfg=cfg, logger=log)
+    starrail.switch_to_game(force=True)
+    log.hr("完成", 2)
+
+
+def ensure_game_ready():
+    """校验游戏窗口存在并切换到前台（workflow 执行前置）。
+
+    与流程编排启动语义一致：游戏未启动或切换失败时记录错误并返回 False，
+    由调用方决定如何终止（本地与云游戏均经 controller 处理）。
+    """
+    controller = get_game_controller()
+    if not controller.is_game_running():
+        log.error("未检测到游戏窗口，workflow 未执行")
+        return False
+    if getattr(auto.input_handler, 'is_background', False) is True:
+        # 后台模式不切换前台：窗口暂时不可操作（例如被最小化）时等待还原，失败时写明原因
+        try:
+            auto.input_handler.wait_for_window(WINDOW_WAIT_SECONDS)
+        except (InputInterrupted, GameWindowLost) as error:
+            log.error(f"{error}，workflow 未执行")
+            return False
+        return True
+    if not controller.switch_to_game():
+        log.error("切换到游戏窗口失败，workflow 未执行")
+        return False
+    return True
+
+
+def start_game():
+    MAX_RETRY = 3
+
+    def check_and_click_enter():
+        # 点击进入
+        if auto.click_element("./assets/images/screen/click_enter.png", "image", 0.9):
+            return True
+        # 游戏热更新，需要确认重启
+        auto.click_element("./assets/images/zh_CN/base/confirm.png", "image", 0.9, take_screenshot=False)
+        # 网络异常等问题，需要重新启动
+        auto.click_element("./assets/images/zh_CN/base/restart.png", "image", 0.9, take_screenshot=False)
+        # 适配国际服，需要点击“开始游戏”
+        auto.click_element("./assets/images/screen/start_game.png", "image", 0.9, take_screenshot=False)
+        # 出现多账号登录页时，需要点击“登录其他账号”
+        auto.click_element("./assets/images/screen/login_switch_account.png", "image", 0.9, take_screenshot=False)
+        # 适配用户协议和隐私政策更新提示，需要点击“同意”
+        auto.click_element("./assets/images/screen/agree_update.png", "image", 0.9, take_screenshot=False)
+        # 登录过期
+        if auto.find_element("./assets/images/screen/account_and_password.png", "image", 0.9, take_screenshot=False):
+            if load_acc_and_pwd(gamereg_uid()) != (None, None):
+                log.info("检测到登录过期，尝试自动登录")
+                auto_login()
+            else:
+                raise PermissionError("账号登录过期")
+        if auto.find_element("./assets/images/screen/password_field.png", "image", 0.9, take_screenshot=False):
+            if load_acc_and_pwd(gamereg_uid()) != (None, None):
+                log.info("检测到登录过期，尝试自动登录")
+                auto_login_os()
+        # 游戏已有新版本，请前往启动器下载最新客户端，完成本次更新后登录游戏即可获
+        # 得300星琼奖励。
+        if auto.find_element("前往启动器下载最新客户端", "text", take_screenshot=False, include=True):
+            raise GameClientOutdatedError(tr("检测到游戏客户端版本过低，请前往启动器下载最新客户端"))
+
+        # 适配B服，需要点击“登录”，强制使用前台截图方式（#901）
+        if auto.find_element(("bilibili游戏隐私政策提示", "登录记录"), "text", use_background_screenshot=False):
+            if auto.matched_text == "bilibili游戏隐私政策提示":
+                auto.click_element("同意", "text", take_screenshot=False)
+            elif auto.matched_text == "登录记录":
+                auto.click_element("登录", "text", take_screenshot=False)
+        else:
+            auto.click_element("./assets/images/screen/bilibili_login.png", "image", 0.9, take_screenshot=False)
+            auto.click_element("./assets/images/screen/bilibili_login_2.png", "image", 0.9, take_screenshot=False)
+            auto.click_element("./assets/images/screen/bilibili_login_3.png", "image", 0.9, take_screenshot=False)
+            auto.click_element("./assets/images/screen/bilibili_agree_update.png", "image", 0.9, take_screenshot=False)
+            auto.click_element("./assets/images/screen/bilibili_agree_update_2.png", "image", 0.9, take_screenshot=False)
+
+        return False
+
+    def cloud_game_check_and_enter():
+        def cloud_click_element(*args, **kwargs):
+            kwargs.setdefault("prefer_frame_screenshot", False)
+            return auto.click_element(*args, **kwargs)
+
+        # 点击进入
+        if cloud_click_element("./assets/images/screen/click_enter.png", "image", 0.9):
+            return True
+        # 同意浏览器授权
+        if cloud_click_element("./assets/images/screen/cloud/agree_to_authorize.png", "image", 0.9, take_screenshot=False):
+            time.sleep(0.5)
+            cloud_click_element("每次访问时都充许", "text", 0.9)
+        # 是否保存网页地址，点击 x 关闭
+        cloud_click_element("./assets/images/screen/cloud/close.png", "image", 0.9, take_screenshot=False)
+        # 是否将《云·星穹铁道》添加到桌面，需要点击“下次再说”
+        cloud_click_element("./assets/images/screen/cloud/next_time.png", "image", 0.9, take_screenshot=False)
+        # 免责声明，需要点击“接受”
+        cloud_click_element("./assets/images/screen/cloud/accept.png", "image", 0.9, take_screenshot=False)
+        # 适配用户协议和隐私政策更新提示，需要点击“同意”
+        cloud_click_element("./assets/images/screen/agree_update.png", "image", 0.9, take_screenshot=False)
+        # 云游戏设置的引导，需要多次点击 “下一步”
+        if cloud_click_element("下一步", "text", 0.9, include=True, take_screenshot=False):
+            time.sleep(0.5)
+            cloud_click_element("下一步", "text", 0.9, include=True)
+            time.sleep(0.5)
+            cloud_click_element("我知道了", "text", 0.9, include=True)
+        # 由于浏览器语言原因，云游戏启动时可能会是默认英文，需要改成中文
+        if cloud_click_element("Settings", "text", 0.9, take_screenshot=False):
+            time.sleep(0.5)
+            cloud_click_element("English", "text", 0.9, crop=(1541.0 / 1920, 198.0 / 1080, 156.0 / 1920, 58.0 / 1080))
+            time.sleep(0.5)
+            cloud_click_element("简体中文", "text", 0.9)
+            time.sleep(0.5)
+            auto.press_key("esc")
+
+    def get_process_path(name):
+        # 通过进程名获取运行路径
+        for proc in psutil.process_iter(attrs=['pid', 'name']):
+            if name in proc.info['name']:
+                process = psutil.Process(proc.info['pid'])
+                return process.exe()
+        return None
+
+    def start_local_game(starrail):
+        if getattr(auto.input_handler, 'is_background', False) is True and starrail.is_game_running():
+            # 后台模式不还原、不激活已运行的游戏：窗口暂时不可操作（例如被最小化）时等待用户还原，
+            # 不能当作游戏未运行而重复启动；超时抛出 InputInterrupted，不走关闭游戏后重启的恢复流程。
+            auto.input_handler.wait_for_window(WINDOW_WAIT_SECONDS)
+        if not starrail.switch_to_game():
+            try:
+                if cfg.auto_set_resolution_enable:
+                    starrail.change_resolution(1920, 1080)
+                    starrail.change_auto_hdr("disable")
+
+                if cfg.auto_battle_detect_enable:
+                    starrail.change_auto_battle(True)
+
+                if not starrail.start_game_process():
+                    raise RuntimeError("启动游戏失败")
+                time.sleep(10)
+
+                if not wait_until(lambda: starrail.switch_to_game(), 360):
+                    raise TimeoutError("切换到游戏超时")
+
+                time.sleep(10)
+            finally:
+                starrail.restore_resolution()
+                starrail.restore_auto_hdr()
+            # starrail.check_resolution_ratio(1920, 1080)
+            starrail.check_resolution(1920, 1080)
+
+            if not wait_until(lambda: check_and_click_enter(), cfg.start_game_timeout * 60):
+                raise TimeoutError("查找并点击进入按钮超时")
+
+            # 偶现加载慢时分辨率修改不成功，进入游戏前增加一次分辨率检查
+            starrail.check_resolution(1920, 1080)
+
+            time.sleep(10)
+            # 修复B服问题 https://github.com/moesnow/March7thAssistant/discussions/321#discussioncomment-10565807
+            auto.press_mouse()
+        else:
+            # starrail.check_resolution_ratio(1920, 1080)
+            starrail.check_resolution(1920, 1080)
+            if cfg.auto_set_game_path_enable:
+                program_path = get_process_path(cfg.game_process_name)
+                if program_path is not None and program_path != cfg.game_path:
+                    cfg.set_value("game_path", program_path)
+                    log.info(f"游戏路径更新成功：{program_path}")
+            time.sleep(1)
+
+    def start_cloud_game():
+        if not cloud_game.start_game_process():
+            raise ConnectionError("启动或连接浏览器失败")
+        if not cloud_game.is_in_game():
+            if not cloud_game.enter_cloud_game():
+                raise ConnectionError("进入云游戏失败")
+            time.sleep(10)
+            if not wait_until(lambda: cloud_game_check_and_enter(), cfg.start_game_timeout * 60):
+                raise TimeoutError("查找并点击进入按钮超时")
+            time.sleep(10)
+
+    for retry in range(MAX_RETRY):
+        try:
+            if cfg.cloud_game_enable:
+                start_cloud_game()
+            else:
+                starrail = StarRailController(cfg=cfg, logger=log)
+                start_local_game(starrail)
+            if not wait_until(lambda: screen.get_current_screen(), 6 * 60):
+                log.error("获取当前界面超时")
+                # 确保在重试前停止游戏
+                if cfg.cloud_game_enable:
+                    cloud_game.stop_game()
+                else:
+                    starrail.stop_game()
+                continue
+            break
+        except CloudGameZeroDurationError:
+            # 时长为 0 时重试也无法进入游戏：关闭浏览器后交给调用方，由主循环决定等待下次运行还是按错误退出
+            cloud_game.stop_game()
+            raise
+        except CloudGameLoginTimeoutError:
+            raise
+        except InputInterrupted:
+            # 窗口持续最小化等需要用户处理的情况不能触发原有的“关闭游戏后重启”恢复路径；
+            # 游戏进程退出（GameWindowLost）仍按普通错误重启游戏。
+            raise
+        except Exception as e:
+            log.error(f"尝试启动游戏时发生错误：{e}")
+            if not cfg.cloud_game_enable and starrail.launch_method == "epic":
+                from module.game.epic import EpicLaunchError
+                if isinstance(e, EpicLaunchError):
+                    # 渠道启动已给出具体阶段错误，不重放协议/点击，不关闭用户启动器。
+                    raise
+            # 确保在重试前停止游戏
+            if cfg.cloud_game_enable:
+                cloud_game.stop_game()
+            else:
+                starrail.stop_game()
+                # 非云游戏模式下，若检测到是版本过低则尝试通过启动器更新
+                if isinstance(e, GameClientOutdatedError) and cfg.update_via_launcher:
+                    update_via_launcher()
+            if retry == MAX_RETRY - 1:
+                raise  # 如果是最后一次尝试，则重新抛出异常
+
+
+def stop(detect_loop=False):
+    log.hr("停止运行", 0)
+
+    def play_audio():
+        log.info("开始播放音频")
+        try:
+            from playsound3 import playsound
+            playsound("./assets/audio/pa.mp3")
+            log.info("播放音频完成")
+        except Exception as e:
+            log.warning(f"播放音频时发生错误：{e}")
+
+    if detect_loop and cfg.after_finish == "Loop":
+        if cfg.play_audio:
+            play_audio()
+        after_finish_is_loop()
+    else:
+        if detect_loop:
+            notify_after_finish_not_loop()
+        if cfg.play_audio:
+            play_audio()
+        # 在关闭游戏前优先退出 OCR 避免内存占用
+        ocr.exit_ocr()
+        if cfg.after_finish in ["Exit", "Loop", "Shutdown", "Sleep", "Hibernate", "Restart", "Logoff", "TurnOffDisplay", "RunScript"]:
+            get_game_controller().shutdown(cfg.after_finish)
+        log.hr("完成", 2)
+        if cfg.after_finish not in ["Shutdown", "Sleep", "Hibernate", "Restart", "Logoff", "TurnOffDisplay", "RunScript"]:
+            pause_on_success()
+        sys.exit(0)
+
+
+def after_finish_is_loop(force_scheduled=False):
+
+    def get_wait_time(current_power):
+        # 距离体力到达配置文件指定的上限剩余秒数
+        wait_time_power_limit = (cfg.power_limit - current_power) * 6 * 60
+        # 距离第二天凌晨4点剩余秒数，+30避免显示3点59分不美观，#7
+        wait_time_next_day = Date.get_time_next_x_am(cfg.refresh_hour) + 30
+        # 取最小值
+        wait_time = min(wait_time_power_limit, wait_time_next_day)
+        return wait_time
+
+    if not force_scheduled and cfg.loop_mode == "power":
+        current_power = Power.get(use_supplement=False)
+        if current_power >= cfg.power_limit:
+            log.info(f"开拓力 >= {cfg.power_limit}")
+            log.info("即将再次运行")
+            log.hr("完成", 2)
+            notif.flush_batch()
+            return
+        else:
+            get_game_controller().stop_game()
+            wait_time = get_wait_time(current_power)
+            future_time = Date.calculate_future_time(wait_time)
+    else:
+        get_game_controller().stop_game()
+        scheduled_time = cfg.scheduled_time
+        wait_time = Date.time_to_seconds(scheduled_time)
+        future_time = Date.calculate_future_time(scheduled_time)
+
+    # 图形界面不支持循环模式，提前检查并退出
+    if is_gui_started():
+        msg = "通过图形界面启动，程序不支持循环模式，请使用日志界面的定时运行功能"
+        log.error(msg)
+        notif.flush_batch(extra_content=msg, level=NotificationLevel.ERROR)
+        log.hr("完成", 2)
+        sys.exit(0)
+
+    final_content = cfg.notify_template['ContinueTime'].format(time=future_time)
+    log.info(final_content)
+    notif.flush_batch(extra_content=final_content, level=NotificationLevel.ALL)
+    log.hr("完成", 2)
+    # 等待状态退出OCR避免内存占用
+    ocr.exit_ocr()
+    # 等待期间不操控游戏，让出运行锁，图形界面或其他命令行可以照常运行任务；
+    # 到点后若其他任务仍在运行，等它结束再开始下一轮
+    with idle_without_run_lock(
+            on_wait=lambda holder: log.info(f"等待正在运行的{describe_run(holder)}结束后再开始下一轮"),
+            on_unavailable=lambda error: log.warning(f"运行锁不可用（{error}），无法确认是否已有其他任务在运行，照常开始下一轮")):
+        # 使用wall clock轮询等待，避免系统休眠后time.sleep剩余时间不准确的问题
+        target_time = time.time() + wait_time
+        while True:
+            remaining = target_time - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(60, remaining))
+
+    # 启动前重新加载配置 #262
+    cfg._load_config()
+
+
+def wait_after_cloud_zero_duration(error):
+    """云游戏时长为 0 时，循环模式下发送通知并等待到下次定时运行，返回 True；
+    非循环模式返回 False，由调用方按错误退出。"""
+    if cfg.after_finish != "Loop":
+        return False
+    msg = cfg.notify_template['ErrorOccurred'].format(error=error)
+    log.error(msg)
+    notif.flush_batch(extra_content=msg, level=NotificationLevel.ERROR)
+    # 无法进入游戏读取开拓力，开拓力循环也改按定时时间等待
+    after_finish_is_loop(force_scheduled=True)
+    return True
+
+
+def _start_launcher_and_get_automation(game):
+    """启动米哈游启动器并返回 (launcher, launcher_auto)。
+    若无法找到路径，返回 (None, None)。若启动器未切换到窗口，返回 (launcher, None)。"""
+    from module.game.launcher import LauncherController
+    if game is None:
+        game = "hkrpg_global" if cfg.launcher_title_name == "HoYoPlay" else "hkrpg_cn"
+    if os.path.exists(cfg.launcher_path):
+        path = cfg.launcher_path
+    else:
+        from utils.registry.star_rail_setting import get_launcher_path
+        path = get_launcher_path()
+        if path is None:
+            log.error("未找到米哈游启动器路径")
+            return None, None
+    launcher = LauncherController(path=path, process_name=cfg.launcher_process_name, window_name=cfg.launcher_title_name, logger=log)
+    launcher.start_game_process(f"--game={game}")
+    time.sleep(10)
+    if launcher.switch_to_game():
+        time.sleep(5)
+        from module.automation.launcher_automation import LauncherAutomation
+        launcher_auto = LauncherAutomation(cfg.launcher_title_name, log)
+        return launcher, launcher_auto
+    return launcher, None
+
+
+def _handle_launcher_self_update(launcher, launcher_auto):
+    """处理启动器自身更新：优先点击“稍后”，否则点击“立即更新”并等待完成。"""
+    # 查找启动器自身更新按钮并点击，如有稍后按钮优先点击
+    if launcher_auto.click_element("稍后", "text"):
+        log.info("已点击稍后更新启动器按钮")
+        time.sleep(5)
+        return True
+
+    if launcher_auto.click_element("立即更新", "text"):
+        log.info("已点击启动器更新按钮，等待更新完成...")
+        Base.send_notification_with_screenshot("检测到启动器可更新已开始下载", NotificationLevel.ALL, launcher_auto.screenshot)
+        time.sleep(10)
+        # 等待启动器更新完成，最长等待60分钟
+        if not wait_until(lambda: launcher_auto.find_element(("更新游戏", "开始游戏"), "text"), 60 * 60, period=30):
+            launcher.stop_game()
+            log.error("等待启动器更新超时")
+            return False
+        log.info("启动器更新完成")
+    return True
+
+
+def _click_update_game_and_wait(launcher, launcher_auto):
+    """点击“更新游戏”并等待完成，失败或超时返回 False。"""
+    if launcher_auto.click_element("更新游戏", "text"):
+        log.info("已点击更新游戏按钮，等待更新完成...")
+        Base.send_notification_with_screenshot("检测到游戏可更新已开始下载", NotificationLevel.ALL, launcher_auto.screenshot)
+
+        def check_update_complete():
+            """检查更新是否完成，同时处理重试按钮"""
+            # 检查是否有重试按钮，如果有则点击
+            if launcher_auto.click_element("重试", "text"):
+                log.info("检测到重试按钮，正在点击...")
+                return False
+            # 检查是否已出现开始游戏按钮（表示更新完成）
+            return launcher_auto.find_element("开始游戏", "text")
+
+        # 等待更新完成，最长等待 cfg.update_game_timeout 小时
+        if not wait_until(check_update_complete, cfg.update_game_timeout * 60 * 60, period=60):
+            launcher.stop_game()
+            log.error("等待游戏更新超时")
+            return False
+        log.info("游戏更新完成")
+        return True
+    log.info("未找到更新游戏按钮，可能已是最新版本")
+    return False
+
+
+def _click_pre_download(launcher, launcher_auto):
+    """点击“预下载”并确认下载，成功返回 True。"""
+    if launcher_auto.click_element("预下载", "text"):
+        time.sleep(10)
+        if launcher_auto.click_element("确认下载", "text"):
+            log.info("已点击预下载按钮...")
+            Base.send_notification_with_screenshot("检测到预下载已开始下载", NotificationLevel.ALL, launcher_auto.screenshot)
+            # 暂不等待预下载完成（按钮：已完成）
+            return True
+    log.info("未找到预下载按钮，可能已是最新版本")
+    return False
+
+
+def update_via_launcher(game=None):
+    """
+    通过米哈游启动器尝试更新指定游戏到最新客户端
+    'hkrpg_cn'（崩坏：星穹铁道国服）、'hk4e_cn'（原神国服）、'nap_cn'（绝区零国服）、'hkrpg_global'（崩坏：星穹铁道国际服）
+    """
+    # 未指定游戏时按启动器类型选择星铁；显式传入的游戏标识保持不变。
+    launcher, launcher_auto = _start_launcher_and_get_automation(game)
+    if launcher is None:
+        return
+
+    # 如果无法切换到启动器窗口，则直接关闭并返回
+    if launcher_auto is None:
+        launcher.stop_game()
+        return
+
+    # 处理启动器自身更新（点击稍后或立即更新并等待）
+    if not _handle_launcher_self_update(launcher, launcher_auto):
+        return
+
+    # 查找更新按钮并点击，等待完成
+    _click_update_game_and_wait(launcher, launcher_auto)
+
+    # 关闭启动器
+    launcher.stop_game()
+
+
+def pre_download_via_launcher(game=None):
+    """
+    通过米哈游启动器尝试预下载指定游戏的最新客户端
+    'hkrpg_cn'（崩坏：星穹铁道国服）、'hk4e_cn'（原神国服）、'nap_cn'（绝区零国服）、'hkrpg_global'（崩坏：星穹铁道国际服）
+    """
+    launcher, launcher_auto = _start_launcher_and_get_automation(game)
+    if launcher is None:
+        return
+
+    # 如果无法切换到启动器窗口，则直接关闭并返回
+    if launcher_auto is None:
+        launcher.stop_game()
+        return
+
+    # 先处理启动器自身更新（若有）
+    if not _handle_launcher_self_update(launcher, launcher_auto):
+        return
+
+    # 触发预下载（暂不处理等待下载过程，直接返回不关闭启动器）
+    if _click_pre_download(launcher, launcher_auto):
+        return
+
+    # 关闭启动器
+    launcher.stop_game()
+
+
+def notify_after_finish_not_loop():
+
+    def get_wait_time(current_power):
+        # 距离体力到达300上限剩余秒数
+        wait_time_power_full = (300 - current_power) * 6 * 60
+        return wait_time_power_full
+
+    current_power = Power.get(use_supplement=False)
+
+    wait_time = get_wait_time(current_power)
+    future_time = Date.calculate_future_time(wait_time)
+    final_content = cfg.notify_template['FullTime'].format(power=current_power, time=future_time)
+    log.info(final_content)
+    notif.flush_batch(extra_content=final_content, level=NotificationLevel.ALL)
+
+
+def ensure_IME_lang_en():
+    """
+    切换输入法语言/键盘语言至英文
+
+    分两种情况，若系统有英语语言，则切换至英语语言，若没有，则切换输入法语言为英文
+    """
+    from module.automation.input_base import background_enabled
+    if background_enabled(cfg):
+        return True  # 后台文本使用 Unicode 消息，不改变用户前台窗口的输入法。
+    import win32api
+    import win32gui
+    from win32con import WM_INPUTLANGCHANGEREQUEST
+    EN = 0x0409
+    hwnd = win32gui.GetForegroundWindow()
+    result = win32api.SendMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, EN)
+    return result == 0
+
+
+def auto_login():
+    def auto_type(text):
+        ensure_IME_lang_en()
+        auto.secretly_write(text, interval=0.1)
+
+    account, password = load_acc_and_pwd(gamereg_uid())
+    if auto.click_element("./assets/images/screen/account_and_password.png", "image", 0.9, max_retries=10):
+        if auto.click_element("./assets/images/screen/account_field.png", "image", 0.9, max_retries=10):
+            auto_type(account)
+            if auto.click_element("./assets/images/screen/password_field.png", "image", 0.9, take_screenshot=False):
+                time.sleep(5)  # 等待切换到密码输入框
+                auto_type(password)
+                if auto.click_element("./assets/images/screen/agree_conditions.png", "image", 0.9, max_retries=10):
+                    if auto.click_element("./assets/images/screen/enter_game.png", "image", 0.9, max_retries=10):
+                        if auto.find_element("./assets/images/screen/welcome.png", "image", 0.9, max_retries=10):
+                            return
+    raise PermissionError("尝试自动登录失败")
+
+
+def auto_login_os():
+    def auto_type(text):
+        ensure_IME_lang_en()
+        time.sleep(1)
+        auto.secretly_write(text, interval=0.1)
+
+    account, password = load_acc_and_pwd(gamereg_uid())
+    if auto.click_element("./assets/images/screen/account_field_os.png", "image", 0.9, max_retries=10):
+        auto_type(account)
+        if auto.click_element("./assets/images/screen/password_field.png", "image", 0.9, take_screenshot=False):
+            time.sleep(5)  # 等待切换到密码输入框
+            auto_type(password)
+            if auto.click_element("./assets/images/screen/enter_game.png", "image", 0.9, max_retries=10):
+                if auto.find_element("./assets/images/screen/welcome.png", "image", 0.9, max_retries=10):
+                    return
+    raise PermissionError("尝试自动登录失败")
